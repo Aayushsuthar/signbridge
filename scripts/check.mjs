@@ -1,7 +1,7 @@
 // Sanity checks for the parts that don't need a camera: `npm run check`
 import assert from "node:assert/strict";
 import { translateWithRules } from "../lib/rules.mjs";
-import { buildUserPrompt, OUTPUT_SCHEMA, TONES } from "../lib/prompt.mjs";
+import { buildTranslatePrompt, buildDescribePrompt, TRANSLATE_SCHEMA, TONES } from "../lib/prompt.mjs";
 import { markChanges } from "../public/js/diff.js";
 import { FaceAnalyzer } from "../public/js/face.js";
 
@@ -15,27 +15,39 @@ const test = (name, fn) => {
 
 test("rules: topic-comment + time reorder", () => {
   const r = translateWithRules({ signs: ["STORE", "ME", "GO", "YESTERDAY"].map((g) => sign(g)) });
-  assert.match(r.english, /yesterday\.$/i);
+  assert.match(r.text, /yesterday\.$/i);
   assert.ok(TONES.includes(r.tone));
 });
 
 test("rules: copula + raised brows makes a question", () => {
   const r = translateWithRules({ signs: [sign("YOU"), sign("HUNGRY")], face: { emotion: "neutral", markers: ["brows-raised"] } });
-  assert.equal(r.english, "You are hungry?");
+  assert.equal(r.text, "You are hungry?");
   assert.equal(r.tone, "questioning");
 });
 
 test("rules: head shake negates", () => {
   const r = translateWithRules({ signs: [sign("ME"), sign("TIRED")], face: { emotion: "neutral", markers: ["head-shake"] } });
-  assert.equal(r.english, "I am not tired.");
+  assert.equal(r.text, "I am not tired.");
 });
 
 test("prompt includes cues and history", () => {
-  const p = buildUserPrompt({ signs: [sign("YOU", ["brows-raised"]), sign("HUNGRY")], face: { emotion: "happy", markers: ["cheek-puff"] }, history: ["Hi!"] });
+  const p = buildTranslatePrompt({ signs: [sign("YOU", ["brows-raised"]), sign("HUNGRY")], face: { emotion: "happy", markers: ["cheek-puff"] }, history: ["Hi!"] });
   assert.match(p, /YOU {2}\[brows-raised\]/);
   assert.match(p, /puffed cheeks/);
   assert.match(p, /Hi!/);
-  assert.deepEqual(OUTPUT_SCHEMA.required, ["english", "tone", "notes"]);
+  assert.deepEqual(TRANSLATE_SCHEMA.required, ["text", "speech", "tone", "notes"]);
+});
+
+test("prompts ask for the chosen language", () => {
+  assert.match(buildTranslatePrompt({ signs: [sign("ME")], lang: "hi" }), /Devanagari/);
+  assert.match(buildTranslatePrompt({ signs: [sign("ME")], lang: "hinglish" }), /Roman script/);
+  assert.match(buildDescribePrompt({ label: "cup", score: 0.9, lang: "en", hasImage: true }), /photo of the object is attached/);
+});
+
+test("rules: non-English request explains the limitation", () => {
+  const r = translateWithRules({ signs: [sign("ME"), sign("HAPPY")], lang: "hi" });
+  assert.equal(r.text, "I am happy.");
+  assert.match(r.notes, /Hindi/);
 });
 
 test("diff underlines only AI-added words", () => {

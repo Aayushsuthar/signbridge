@@ -58,21 +58,32 @@ export class Overlay {
     }
   }
 
+  clear() {
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+
   render(handResult, faceResult, { showFace = true, showHands = true } = {}) {
     const { ctx } = this;
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.clear();
     const face = faceResult?.faceLandmarks?.[0];
     if (showFace && face) {
-      this.draw.drawConnectors(face, FaceLandmarker.FACE_LANDMARKS_TESSELATION, { color: "rgba(120, 200, 255, 0.10)", lineWidth: 0.6 });
-      this.draw.drawConnectors(face, FaceLandmarker.FACE_LANDMARKS_CONTOURS, { color: "rgba(120, 200, 255, 0.55)", lineWidth: 1.2 });
-      this.draw.drawLandmarks(face, { color: "rgba(150, 220, 255, 0.55)", radius: 0.7, lineWidth: 0 });
+      this.draw.drawConnectors(face, FaceLandmarker.FACE_LANDMARKS_TESSELATION, { color: "rgba(139, 92, 246, 0.14)", lineWidth: 0.6 });
+      ctx.shadowColor = "rgba(92, 242, 255, 0.8)";
+      ctx.shadowBlur = 6;
+      this.draw.drawConnectors(face, FaceLandmarker.FACE_LANDMARKS_CONTOURS, { color: "rgba(92, 242, 255, 0.7)", lineWidth: 1.4 });
+      ctx.shadowBlur = 0;
+      this.draw.drawLandmarks(face, { color: "rgba(200, 240, 255, 0.5)", radius: 0.6, lineWidth: 0 });
     }
     if (showHands) {
       (handResult?.landmarks || []).forEach((hand, i) => {
         const side = handResult.handedness?.[i]?.[0]?.categoryName;
-        const color = side === "Left" ? "#ff9f43" : "#2ee6a6";
-        this.draw.drawConnectors(hand, HandLandmarker.HAND_CONNECTIONS, { color, lineWidth: 3 });
-        this.draw.drawLandmarks(hand, { color: "#ffffff", fillColor: color, radius: 3.5, lineWidth: 1 });
+        const color = side === "Left" ? "#ff4fd8" : "#5cf2ff";
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 16;
+        this.draw.drawConnectors(hand, HandLandmarker.HAND_CONNECTIONS, { color, lineWidth: 3.5 });
+        ctx.shadowBlur = 10;
+        this.draw.drawLandmarks(hand, { color: "#ffffff", fillColor: color, radius: 4, lineWidth: 1.5 });
+        ctx.shadowBlur = 0;
       });
     }
   }

@@ -1,8 +1,8 @@
 {
   "name": "signbridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Real-time ASL to spoken English: MediaPipe hand + face tracking, LLM translation, emotion-aware voice",
+  "description": "Real-time sign language to speech with hand, face and object recognition, in English, Hindi and Hinglish",
   "type": "module",
   "scripts": {
     "start": "node server.mjs",

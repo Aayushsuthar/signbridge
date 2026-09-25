@@ -1,6 +1,6 @@
 # 🤟 SignBridge
 
-**Real-time American Sign Language → spoken English, with the emotion kept in.**
+**Real-time sign language → natural speech, with the emotion kept in. English · हिन्दी · Hinglish.**
 
 SignBridge watches you sign through your webcam. It tracks **21 points on each hand** and **468 points on your face**. Hand tracking recognises the signs and builds them into a sentence. Face tracking picks up the part most translators miss: emotion, and ASL's *facial grammar*. Both go to an LLM, which writes a natural English sentence (words the AI added or changed are underlined). A voice then speaks it in a tone that matches your expression.
 
@@ -28,6 +28,8 @@ Emotion changes word choice and delivery too. `FINISH WORK` with a smile becomes
 
 ## Features
 
+**New in 0.2:** liquid-glass UI with a WebGL liquid-metal background and a 3D particle hand, 🔍 **object recognition**, **English / Hindi / Hinglish** output, and **expressive female voices**.
+
 - **Live hand + face mesh** overlay, running fully in the browser on the GPU (MediaPipe Tasks).
 - **Train your own signs** in seconds. The classifier uses handshape, palm orientation, location relative to the face, and movement (four of the five ASL parameters). Non-manual markers, the fifth, go to the LLM.
 - **Sentence building**: a sign is committed once it holds steady; drop your hands to finish the sentence and translate.
@@ -37,10 +39,14 @@ Emotion changes word choice and delivery too. `FINISH WORK` with a smile becomes
   - **Claude**, when `ANTHROPIC_API_KEY` is set
   - **Offline rules**, so the app always works
 - **Emotion-matched voice**: ElevenLabs with per-tone voice settings, or the browser's voice as a free fallback.
+- **🔍 Objects mode**: 80 everyday object types are detected live (MediaPipe EfficientDet). Tap any box to hear what it is, with 3 facts. Claude, or a vision model on Ollama, looks at the actual photo; the offline fallback uses Wikipedia.
+- **English, हिन्दी, Hinglish**: translations and object descriptions in the language you pick. Reply captions listen in Indian English or Hindi.
+- **Expressive female voices**: pick Sarah, Aria, Jessica, Lily, Charlotte or Rachel. With `eleven_v3` the AI adds performance tags (`[excited]`, `[sighs]`, `[laughs softly]`) so the voice really acts. Without a key, the best female system voice is chosen automatically.
+- **Pro UI**: glassmorphism, liquid buttons, animated aurora borders, word-by-word caption reveal, a live voice waveform, an emotion orb that morphs with your mood, 3D tilt cards. Respects reduced-motion settings.
 - **Two-way conversation**: "Listen to reply" captions the hearing person's speech, so the Deaf user can read it.
 - **Practice mode**: the app shows a word and checks your signing. Useful for learning, and for spotting weak signs.
 - **Type signs instead**: test the translator by typing glosses.
-- Transcript export, sign-set export/import (JSON), and keyboard shortcuts (`Enter` translate, `Backspace` undo, `Esc` clear, `R` record).
+- Transcript export, sign-set export/import (JSON), and keyboard shortcuts (`Enter` translate, `Backspace` undo, `Esc` clear, `R` record, `O` objects mode).
 
 ## Quick start
 
@@ -70,17 +76,23 @@ Keep Ollama running. SignBridge detects it automatically.
 
 **Claude:** put `ANTHROPIC_API_KEY=...` in `.env` (default model `claude-opus-5`, set with `CLAUDE_MODEL`).
 
-**Expressive voice:** put `ELEVENLABS_API_KEY=...` in `.env`. Change `ELEVENLABS_VOICE_ID` to use a different voice, or set `ELEVENLABS_MODEL=eleven_v3` for audio-tag emotion control.
+**Expressive voice:** put `ELEVENLABS_API_KEY=...` in `.env`. The default model `eleven_v3` performs emotion tags; if your plan doesn't include it, SignBridge falls back to `eleven_multilingual_v2` with emotion-tuned voice settings.
+
+**Objects that the AI can see:** Claude sees the tapped object automatically. For Ollama, use a vision model: `ollama pull llama3.2-vision` and set `OLLAMA_MODEL=llama3.2-vision`.
 
 Force a backend with `LLM=ollama|claude|rules`.
 
 ## Project layout
 
 ```
-server.mjs            HTTP server: static files, /api/translate, /api/speak, /api/status
+server.mjs            HTTP server: static files, /api/translate, /api/describe, /api/speak, /api/status
 lib/prompt.mjs        interpreter prompt, facial-grammar descriptions, JSON output schema
 lib/rules.mjs         offline fallback translator
+lib/wiki.mjs          Wikipedia summaries to ground object descriptions
 public/index.html     UI
+public/js/bg-shader.js   WebGL liquid-metal background
+public/js/hero3d.js   three.js particle hand for the landing screen
+public/js/objects.js  object detection, smoothed tracking, crops for vision models
 public/js/vision.js   MediaPipe setup, drawing, 138-dim hand feature vector
 public/js/classifier.js  k-NN classifier, persistence, import/export
 public/js/face.js     emotion + non-manual markers from blendshapes and head pose
@@ -92,7 +104,7 @@ scripts/check.mjs     `npm run check`: tests for the camera-free logic
 
 ## Privacy
 
-Video is processed in the browser and never uploaded. Only the recognised sign names and face-cue labels (e.g. `["ME","HUNGRY"]`, `brows-raised`, `happy`) go to the translator. With Ollama, even that stays on your machine.
+Video is processed in the browser and never uploaded. Only the recognised sign names and face-cue labels (e.g. `["ME","HUNGRY"]`, `brows-raised`, `happy`) go to the translator. When you tap an object, a small crop of that object is sent to the describing model (Claude, or Ollama locally). With Ollama, everything stays on your machine.
 
 ## Limitations & roadmap
 
