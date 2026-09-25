@@ -1,0 +1,19 @@
+{
+  "name": "signbridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-time ASL to spoken English: MediaPipe hand + face tracking, LLM translation, emotion-aware voice",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "check": "node --check server.mjs && node scripts/check.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "license": "MIT"
+}

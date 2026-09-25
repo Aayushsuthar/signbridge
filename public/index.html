@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SignBridge</title>
+    <meta name="description" content="Real-time ASL to spoken English with hand and face tracking." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤟</text></svg>" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="logo">🤟</span> SignBridge</div>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="translate" aria-selected="true">Translate</button>
+        <button role="tab" data-tab="train" aria-selected="false">Train signs</button>
+        <button role="tab" data-tab="practice" aria-selected="false">Practice</button>
+      </nav>
+      <div class="status">
+        <span class="pill" id="status-vision" title="Hand + face tracking">Vision: loading</span>
+        <span class="pill" id="status-llm" title="Translator">LLM: …</span>
+        <span class="pill" id="status-voice" title="Voice">Voice: …</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="left">
+        <div class="stage" id="stage">
+          <video id="video" playsinline muted></video>
+          <canvas id="overlay"></canvas>
+
+          <div class="hud hud-pred" id="hud-pred" hidden>
+            <div class="hud-label" id="pred-label">—</div>
+            <div class="bar"><div class="bar-fill" id="pred-bar"></div></div>
+            <div class="hud-sub mono" id="pred-sub"></div>
+          </div>
+
+          <div class="hud hud-face" id="hud-face" hidden>
+            <div class="emotion"><span id="face-emoji">😐</span> <span id="face-emotion">neutral</span></div>
+            <div class="chips" id="face-markers"></div>
+          </div>
+
+          <div class="hud hud-pause" id="hud-pause" hidden>
+            <svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15" class="ring-bg" /><circle cx="18" cy="18" r="15" class="ring" id="pause-ring" /></svg>
+            <span>hands down → translate</span>
+          </div>
+
+          <div class="countdown" id="countdown" hidden></div>
+          <div class="fps mono" id="fps"></div>
+
+          <div class="start" id="start">
+            <div class="start-card">
+              <div class="start-logo">🤟</div>
+              <h1>SignBridge</h1>
+              <p>Sign in front of your camera. Hand tracking reads the signs, face tracking reads the emotion and facial grammar, an AI turns it into natural English, and a voice speaks it.</p>
+              <button class="btn primary big" id="start-btn">Start camera</button>
+              <p class="fine" id="start-msg">Everything runs locally in your browser. Video never leaves this machine.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="sentence">
+          <div class="sentence-head">
+            <span class="kicker">Signs</span>
+            <div class="sentence-actions">
+              <button class="btn ghost sm" id="undo" title="Backspace">Undo</button>
+              <button class="btn ghost sm" id="clear" title="Esc">Clear</button>
+              <button class="btn primary sm" id="translate-now" title="Enter">Translate ↵</button>
+            </div>
+          </div>
+          <div class="signs" id="signs"><span class="placeholder">Recognised signs appear here…</span></div>
+        </div>
+
+        <div class="result" id="result">
+          <div class="result-text" id="result-text"><span class="placeholder">The English translation will appear here.</span></div>
+          <div class="result-meta">
+            <span id="result-meta"></span>
+            <button class="btn ghost sm" id="replay" hidden>🔊 Replay</button>
+          </div>
+          <div class="result-notes" id="result-notes"></div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <!-- TRANSLATE -->
+        <div class="tab-panel" data-panel="translate">
+          <div class="card">
+            <div class="card-head">
+              <h2>Conversation</h2>
+              <button class="btn ghost sm" id="export-transcript">Export</button>
+            </div>
+            <ol class="transcript" id="transcript"><li class="placeholder">Nothing yet. Train a few signs, then start signing.</li></ol>
+            <div class="reply">
+              <button class="btn" id="listen">🎙️ Listen to reply</button>
+              <div class="caption" id="caption" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <form class="card" id="manual-form">
+            <h2>Type signs instead</h2>
+            <p class="fine">Test the translator without training: type glosses in signing order. Current face cues are applied.</p>
+            <div class="row">
+              <input id="manual-input" placeholder="e.g. STORE ME GO YESTERDAY" autocomplete="off" />
+              <button class="btn primary">Go</button>
+            </div>
+            <div class="examples" id="examples"></div>
+          </form>
+
+          <details class="card">
+            <summary><h2>Settings</h2></summary>
+            <label class="check"><input type="checkbox" id="opt-auto" checked /> Auto-translate when hands drop</label>
+            <label class="check"><input type="checkbox" id="opt-speak" checked /> Speak translations</label>
+            <label class="check"><input type="checkbox" id="opt-mesh" checked /> Show face mesh</label>
+            <label class="slider">Pause before translating <span class="mono" id="opt-pause-val">1.6s</span>
+              <input type="range" id="opt-pause" min="800" max="4000" step="100" value="1600" /></label>
+          </details>
+        </div>
+
+        <!-- TRAIN -->
+        <div class="tab-panel" data-panel="train" hidden>
+          <div class="card">
+            <h2>Record a sign</h2>
+            <p class="fine">Type a name, press Record, and hold the sign (moving slightly) for 2 seconds. Record each sign 2–3 times from slightly different angles. Also record a <code>_rest</code> sign with your hands relaxed so idle poses are ignored.</p>
+            <div class="row">
+              <input id="label-input" placeholder="Sign name, e.g. HELLO" autocomplete="off" />
+              <button class="btn primary" id="record-btn" title="R">● Record</button>
+            </div>
+            <div class="vocab" id="vocab"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h2>Your signs <span class="count" id="sign-count"></span></h2>
+              <div class="row tight">
+                <button class="btn ghost sm" id="export-signs">Export</button>
+                <label class="btn ghost sm file">Import<input type="file" id="import-signs" accept="application/json" hidden /></label>
+              </div>
+            </div>
+            <ul class="sign-list" id="sign-list"></ul>
+            <button class="btn ghost sm danger" id="clear-signs">Delete all</button>
+          </div>
+
+          <div class="card">
+            <h2>Tuning</h2>
+            <button class="btn" id="calibrate-btn">🙂 Calibrate neutral face</button>
+            <p class="fine">Look at the camera with a relaxed face for 1.5 s. After this, only deliberate expressions count as cues.</p>
+            <label class="slider">Recognition tolerance <span class="mono" id="tolerance-val">2.2</span>
+              <input type="range" id="tolerance" min="1" max="4" step="0.1" value="2.2" /></label>
+            <p class="fine">Lower = stricter (fewer false signs). Higher = more forgiving.</p>
+          </div>
+        </div>
+
+        <!-- PRACTICE -->
+        <div class="tab-panel" data-panel="practice" hidden>
+          <div class="card practice">
+            <h2>Practice</h2>
+            <p class="fine">Sign the word shown. Great for learning, and for checking which of your signs need more training.</p>
+            <div class="practice-target" id="practice-target">—</div>
+            <div class="practice-feedback" id="practice-feedback"></div>
+            <div class="practice-score">Score <b id="practice-score">0</b> · Streak <b id="practice-streak">0</b></div>
+            <div class="row center">
+              <button class="btn" id="practice-skip">Skip</button>
+              <button class="btn primary" id="practice-start">Start</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>
