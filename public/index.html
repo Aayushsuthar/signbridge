@@ -162,6 +162,10 @@
               <h2>Conversation</h2>
               <button class="btn-glass xs" id="export-transcript">Export</button>
             </div>
+            <button class="setup-nudge" id="setup-nudge" hidden>
+              <b>⚡ Make it smarter, free</b>
+              <span>Offline mode is on. Add a free Groq or Gemini key (1 minute) for natural sentences in English, हिन्दी &amp; Hinglish.</span>
+            </button>
             <ol class="transcript" id="transcript"><li class="empty">Train a few signs, then start signing. Replies you capture with 🎙️ appear here too.</li></ol>
             <p class="result-notes" id="result-notes"></p>
             <form class="type-signs" id="manual-form">
@@ -241,7 +245,10 @@
 
           <!-- SETTINGS -->
           <div class="tab-panel" data-panel="settings" hidden>
-            <h2>Voice</h2>
+            <h2>AI brain</h2>
+            <p class="fine" id="brain-hint">Connect one free AI for natural sentences, Hindi &amp; Hinglish, and smarter object answers. No install needed. Your key is saved only in this project's <code>.env</code> file on your computer.</p>
+            <div class="providers" id="providers"></div>
+            <h2 class="spaced">Voice</h2>
             <p class="fine" id="voice-hint"></p>
             <div class="voices" id="voices"></div>
             <h2 class="spaced">Behaviour</h2>

@@ -35,9 +35,10 @@ Emotion changes word choice and delivery too. `FINISH WORK` with a smile becomes
 - **Sentence building**: a sign is committed once it holds steady; drop your hands to finish the sentence and translate.
 - **Emotion + facial-grammar detection**, with one-click neutral-face calibration.
 - **LLM translation** with underlined AI edits, conversation context, and three backends:
-  - **Ollama** (local, private, free), the default when running
-  - **Claude**, when `ANTHROPIC_API_KEY` is set
-  - **Offline rules**, so the app always works
+  - **Groq** or **Google Gemini**: free cloud AI, set up inside the app in a minute
+  - **Ollama**: local and private, if you have the disk space
+  - **Claude**: paid, best quality
+  - **Offline grammar**: English, Hindi and Hinglish with no AI, so the app always works
 - **Emotion-matched voice**: ElevenLabs with per-tone voice settings, or the browser's voice as a free fallback.
 - **🔍 Objects mode**: 80 everyday object types are detected live (MediaPipe EfficientDet). Tap any box to hear what it is, with 3 facts. Claude, or a vision model on Ollama, looks at the actual photo; the offline fallback uses Wikipedia.
 - **English, हिन्दी, Hinglish**: translations and object descriptions in the language you pick. Reply captions listen in Indian English or Hindi.
@@ -65,9 +66,17 @@ npm start                # → http://localhost:5173
 3. Back on **Translate**, sign a sentence, then drop your hands. SignBridge translates and speaks it.
 4. Optional: **Calibrate neutral face** so your resting expression isn't mistaken for a cue.
 
-### Better translations (recommended)
+### Better translations (recommended, free)
 
-**Local, private (Ollama):**
+**No install, free (recommended):** open ⚙ **Settings → AI brain** in the app and paste a key:
+- **Groq**: sign up with email at [console.groq.com/keys](https://console.groq.com/keys). Fastest.
+- **Google Gemini**: sign in with Google at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+
+The app checks the key, saves it to `.env` and switches over instantly, with no restart. Both handle Hindi and Hinglish and can see tapped objects.
+
+**Works with no key at all:** the built-in offline grammar handles the starter vocabulary in all three languages, e.g. `STORE ME GO YESTERDAY` gives *I went to the store yesterday.* / *मैं कल दुकान गया।* / *Main kal dukaan gaya.*
+
+**Local, private (Ollama, needs ~2 GB of disk):**
 ```bash
 brew install ollama        # or download from ollama.com
 ollama pull llama3.2
@@ -80,14 +89,14 @@ Keep Ollama running. SignBridge detects it automatically.
 
 **Objects that the AI can see:** Claude sees the tapped object automatically. For Ollama, use a vision model: `ollama pull llama3.2-vision` and set `OLLAMA_MODEL=llama3.2-vision`.
 
-Force a backend with `LLM=ollama|claude|rules`.
+Force a backend with `LLM=groq|gemini|ollama|claude|rules`.
 
 ## Project layout
 
 ```
 server.mjs            HTTP server: static files, /api/translate, /api/describe, /api/speak, /api/status
 lib/prompt.mjs        interpreter prompt, facial-grammar descriptions, JSON output schema
-lib/rules.mjs         offline fallback translator
+lib/rules.mjs         offline grammar: ASL gloss → English / Hindi / Hinglish
 lib/wiki.mjs          Wikipedia summaries to ground object descriptions
 public/index.html     UI
 public/js/bg-shader.js   WebGL liquid-metal background

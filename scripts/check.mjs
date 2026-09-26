@@ -13,15 +13,29 @@ const test = (name, fn) => {
   console.log(`  ✓ ${name}`);
 };
 
-test("rules: topic-comment + time reorder", () => {
-  const r = translateWithRules({ signs: ["STORE", "ME", "GO", "YESTERDAY"].map((g) => sign(g)) });
-  assert.match(r.text, /yesterday\.$/i);
-  assert.ok(TONES.includes(r.tone));
+const say = (glosses, lang = "en", markers = []) =>
+  translateWithRules({ signs: glosses.split(" ").map((g) => sign(g)), face: { emotion: "neutral", markers }, lang }).text;
+
+test("rules: topic-comment + time reorder, in 3 languages", () => {
+  assert.equal(say("STORE ME GO YESTERDAY"), "I went to the store yesterday.");
+  assert.equal(say("STORE ME GO YESTERDAY", "hi"), "मैं कल दुकान गया।");
+  assert.equal(say("STORE ME GO YESTERDAY", "hinglish"), "Main kal dukaan gaya.");
+  assert.ok(TONES.includes(translateWithRules({ signs: [sign("ME")] }).tone));
+});
+
+test("rules: wh-questions, want, ergative, future", () => {
+  assert.equal(say("YOUR NAME WHAT"), "What is your name?");
+  assert.equal(say("YOUR NAME WHAT", "hi"), "तुम्हारा नाम क्या है?");
+  assert.equal(say("ME WANT WATER", "hinglish"), "Mujhe paani chahiye.");
+  assert.equal(say("ME FINISH WORK", "hi"), "मैंने काम खत्म किया।");
+  assert.equal(say("TOMORROW ME GO WORK"), "I will go to work tomorrow.");
+  assert.equal(say("FRIEND HELP ME", "hinglish"), "Dost meri madad karta hai.");
+  assert.equal(say("HELLO ME HAPPY TODAY"), "Hello! I am happy today.");
 });
 
 test("rules: copula + raised brows makes a question", () => {
   const r = translateWithRules({ signs: [sign("YOU"), sign("HUNGRY")], face: { emotion: "neutral", markers: ["brows-raised"] } });
-  assert.equal(r.text, "You are hungry?");
+  assert.equal(r.text, "Are you hungry?");
   assert.equal(r.tone, "questioning");
 });
 
@@ -44,10 +58,9 @@ test("prompts ask for the chosen language", () => {
   assert.match(buildDescribePrompt({ label: "cup", score: 0.9, lang: "en", hasImage: true }), /photo of the object is attached/);
 });
 
-test("rules: non-English request explains the limitation", () => {
-  const r = translateWithRules({ signs: [sign("ME"), sign("HAPPY")], lang: "hi" });
-  assert.equal(r.text, "I am happy.");
-  assert.match(r.notes, /Hindi/);
+test("rules: yes/no question and negation in Hindi", () => {
+  assert.equal(say("YOU GO STORE YESTERDAY", "hi", ["brows-raised"]), "क्या तुम कल दुकान गए?");
+  assert.equal(say("ME GO SCHOOL", "hinglish", ["head-shake"]), "Main school nahi jata.");
 });
 
 test("diff underlines only AI-added words", () => {

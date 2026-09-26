@@ -460,6 +460,31 @@ input:focus { outline: none; border-color: rgba(92, 242, 255, 0.6); box-shadow: 
 .practice-feedback.good { color: var(--mint); }
 .practice-score { color: var(--muted); margin: 8px 0 14px; }
 
+/* settings: AI providers */
+.providers { display: flex; flex-direction: column; gap: 8px; }
+.provider { border-radius: 14px; padding: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--glass-line); transition: border-color 0.3s, background 0.3s; }
+.provider.on { border-color: rgba(46, 230, 166, 0.5); background: linear-gradient(140deg, rgba(46, 230, 166, 0.1), rgba(92, 242, 255, 0.06)); }
+.provider-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.provider-head b { font-family: var(--display); }
+.provider-head .tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: rgba(92, 242, 255, 0.14); color: var(--cyan); white-space: nowrap; }
+.provider-head .tag.paid { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+.provider.on .provider-head .tag { background: rgba(46, 230, 166, 0.18); color: var(--mint); }
+.provider p { margin: 4px 0 8px; font-size: 12.5px; color: var(--muted); }
+.provider a { color: var(--cyan); }
+.provider form { display: flex; gap: 6px; }
+.provider input { height: 32px; font-size: 13px; font-family: var(--mono); }
+.provider .msg { font-size: 12px; margin-top: 6px; min-height: 0; }
+.provider .msg.err { color: var(--danger); }
+.provider .msg.ok { color: var(--mint); }
+.setup-nudge {
+  display: block; width: 100%; text-align: left; cursor: pointer; margin-bottom: 12px; padding: 12px 14px; border-radius: 16px; color: var(--text); font: inherit;
+  background: linear-gradient(135deg, rgba(92, 242, 255, 0.16), rgba(139, 92, 246, 0.16) 50%, rgba(255, 79, 216, 0.14));
+  border: 1px solid rgba(92, 242, 255, 0.35); animation: msgin 0.5s var(--spring); transition: transform 0.3s var(--spring);
+}
+.setup-nudge:hover { transform: translateY(-2px); }
+.setup-nudge b { display: block; font-family: var(--display); margin-bottom: 2px; }
+.setup-nudge span { font-size: 13px; color: var(--muted); }
+
 /* settings */
 .voices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .voice {

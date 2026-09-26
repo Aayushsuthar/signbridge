@@ -31,6 +31,14 @@ const ANNOUNCE = {
   hinglish: (l) => `Mujhe ${l} dikh raha hai.`,
 };
 
+const PROVIDERS = [
+  { id: "groq", name: "Groq", tag: "Free · fastest", how: "Sign up with email, then create a key at", link: "https://console.groq.com/keys", ph: "gsk_…" },
+  { id: "gemini", name: "Google Gemini", tag: "Free · Google account", how: "Sign in with Google and click “Create API key” at", link: "https://aistudio.google.com/apikey", ph: "AIza…" },
+  { id: "elevenlabs", name: "ElevenLabs voice", tag: "Free tier", how: "Expressive female voice. Create a key at", link: "https://elevenlabs.io/app/settings/api-keys", ph: "sk_…" },
+  { id: "claude", name: "Claude", tag: "Paid", how: "Best quality. Create a key at", link: "https://console.anthropic.com/settings/keys", ph: "sk-ant-…" },
+];
+const LLM_NAME = { ollama: "Ollama", claude: "Claude", groq: "Groq", gemini: "Gemini" };
+
 // recognition tuning
 const WINDOW = 12; // frames of predictions considered
 const NEED = 8; // agreeing frames needed to commit a sign
@@ -192,13 +200,13 @@ async function refreshStatus() {
     const s = await (await fetch("/api/status")).json();
     state.status = s;
     const llm = $("status-llm");
-    llm.lastChild.textContent = s.llm === "rules" ? "Offline rules" : `${s.llm === "claude" ? "Claude" : "Ollama"} · ${s.llmModel}`;
+    llm.lastChild.textContent = s.llm === "rules" ? "Offline grammar" : `${LLM_NAME[s.llm]} · ${s.llmModel}`;
     llm.className = `pill ${s.llm === "rules" ? "warn" : "ok"}`;
     llm.title =
       s.llm === "rules"
         ? s.ollama.running
           ? `Ollama is running but "${s.ollama.model}" isn't pulled. Run: ollama pull ${s.ollama.model}`
-          : "No LLM connected. Start Ollama or add ANTHROPIC_API_KEY to .env for natural, multilingual translations."
+          : "No AI connected. Add a free Groq or Gemini key in ⚙ Settings."
         : `Translator${s.vision ? " (can see objects)" : ""}`;
     const voice = $("status-voice");
     voice.lastChild.textContent = s.voice === "elevenlabs" ? "ElevenLabs" : "Browser voice";
@@ -206,7 +214,9 @@ async function refreshStatus() {
     $("voice-hint").textContent =
       s.voice === "elevenlabs"
         ? `ElevenLabs · ${s.voiceModel}${s.voiceModel?.startsWith("eleven_v3") ? " (emotion tags on)" : ""}. Tap a voice to hear it.`
-        : "Add ELEVENLABS_API_KEY to .env to use these expressive voices. Until then your browser's best female voice speaks.";
+        : "Add a free ElevenLabs key above to use these expressive voices. Until then your browser's best female voice speaks.";
+    $("setup-nudge").hidden = s.llm !== "rules";
+    renderProviders(s);
   } catch {
     $("status-llm").lastChild.textContent = "Server offline";
     $("status-llm").className = "pill warn";
@@ -791,6 +801,59 @@ function practiceCheck(gloss) {
 
 // ---------- settings ----------
 
+let providersKey = "";
+function renderProviders(status) {
+  const key = JSON.stringify([status.keys, status.llm]);
+  if (key === providersKey) return; // don't wipe a key the user is typing on the periodic refresh
+  providersKey = key;
+  $("providers").replaceChildren(
+    ...PROVIDERS.map((pr) => {
+      const on = Boolean(status.keys?.[pr.id]);
+      const active = status.llm === pr.id;
+      const msg = el("div", { className: "msg" });
+      const input = el("input", { type: "password", placeholder: on ? "Connected. Paste a new key to replace it." : `Paste key (${pr.ph})`, autocomplete: "off", spellcheck: false });
+      const save = el("button", { className: "btn-glass xs", textContent: "Save" });
+      const form = el("form", {}, input, save);
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        if (!input.value.trim()) return;
+        save.disabled = true;
+        save.textContent = "Checking…";
+        msg.className = "msg";
+        msg.textContent = "";
+        try {
+          const res = await fetch("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: pr.id, key: input.value.trim() }) });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || res.statusText);
+          input.value = "";
+          toast(pr.id === "elevenlabs" ? "✓ ElevenLabs connected. Tap a voice below to hear it." : `✓ ${pr.name} connected. Translations now use ${LLM_NAME[data.llm] || data.llm}.`, 4000);
+          providersKey = "";
+          await refreshStatus();
+        } catch (err) {
+          msg.className = "msg err";
+          msg.textContent = err.message;
+        } finally {
+          save.disabled = false;
+          save.textContent = "Save";
+        }
+      };
+      const head = el("div", { className: "provider-head" }, el("b", { textContent: pr.name }), el("span", { className: `tag${pr.tag === "Paid" ? " paid" : ""}`, textContent: on ? (active ? "✓ In use" : "✓ Connected") : pr.tag }));
+      const how = el("p", {}, `${pr.how} `, el("a", { href: pr.link, target: "_blank", rel: "noopener", textContent: pr.link.replace("https://", "") }), ".");
+      const card = el("div", { className: `provider${on ? " on" : ""}` }, head, how, form, msg);
+      if (on) {
+        const remove = el("button", { type: "button", className: "btn-glass xs danger", textContent: "Remove" });
+        remove.onclick = async () => {
+          await fetch("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: pr.id, key: "" }) });
+          providersKey = "";
+          refreshStatus();
+        };
+        form.append(remove);
+      }
+      return card;
+    }),
+  );
+}
+
 function renderVoices() {
   $("voices").replaceChildren(
     ...VOICES.map((v) => {
@@ -828,7 +891,7 @@ function bind() {
         listener.setLang(state.opts.lang);
         saveOpts();
         const name = { en: "English", hi: "हिन्दी", hinglish: "Hinglish" }[state.opts.lang];
-        toast(`Speaking ${name}${state.status?.llm === "rules" ? ". Connect Ollama or Claude for Hindi/Hinglish." : ""}`);
+        toast(`Speaking ${name}${state.status?.llm === "rules" ? " (offline grammar: simple sentences only)" : ""}`);
       }),
   );
   addEventListener("resize", () => document.querySelectorAll(".seg").forEach(positionPill));
@@ -843,6 +906,7 @@ function bind() {
     renderSigns();
   };
   $("translate-now").onclick = () => finishSentence();
+  $("setup-nudge").onclick = () => setTab("settings");
   $("replay").onclick = () => state.lastResult && say(state.lastResult.speech, state.lastResult.tone, { force: true, lang: state.lastResult.lang });
 
   $("manual-form").onsubmit = (e) => {

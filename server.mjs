@@ -1,7 +1,7 @@
 // SignBridge server: serves the app, translates signs and describes objects with an LLM,
 // and turns text into expressive speech. No framework, one dependency.
 import http from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { translateWithRules } from "./lib/rules.mjs";
@@ -30,6 +30,10 @@ const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
 const OLLAMA_SEES = /llava|vision|gemma3|qwen2\.5vl|qwen3-vl|moondream|minicpm-v/i.test(OLLAMA_MODEL);
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-5";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || "qwen/qwen3.8-27b";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+const ENV_FILE = path.join(here, ".env");
 const ELEVEN_VOICE = process.env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSDxMaL";
 const ELEVEN_MODEL = process.env.ELEVENLABS_MODEL || "eleven_v3";
 
@@ -58,14 +62,18 @@ async function ollamaStatus() {
   }
 }
 
+const KEY_FOR = { claude: "ANTHROPIC_API_KEY", groq: "GROQ_API_KEY", gemini: "GEMINI_API_KEY" };
+const MODEL_FOR = { ollama: () => OLLAMA_MODEL, claude: () => CLAUDE_MODEL, groq: () => GROQ_MODEL, gemini: () => GEMINI_MODEL };
+
 async function pickBackend() {
   const wanted = (process.env.LLM || "auto").toLowerCase();
   if (wanted === "rules") return "rules";
-  if (wanted === "claude") return process.env.ANTHROPIC_API_KEY ? "claude" : "rules";
+  if (KEY_FOR[wanted]) return process.env[KEY_FOR[wanted]] ? wanted : "rules";
   const ollama = await ollamaStatus();
   if (wanted === "ollama") return ollama.running && ollama.hasModel ? "ollama" : "rules";
   if (ollama.running && ollama.hasModel) return "ollama";
-  if (process.env.ANTHROPIC_API_KEY) return "claude";
+  // free cloud options first, then Claude
+  for (const b of ["groq", "gemini", "claude"]) if (process.env[KEY_FOR[b]]) return b;
   return "rules";
 }
 
@@ -117,8 +125,53 @@ async function askClaude({ system, user, schema, image }) {
   return JSON.parse(text);
 }
 
+// Groq: OpenAI-compatible, free tier. gpt-oss for text (strict JSON schema), a Qwen model when there's an image.
+async function askGroq({ system, user, schema, image }) {
+  const model = image ? GROQ_VISION_MODEL : GROQ_MODEL;
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { authorization: `Bearer ${process.env.GROQ_API_KEY}`, "content-type": "application/json" },
+    signal: AbortSignal.timeout(45_000),
+    body: JSON.stringify({
+      model,
+      temperature: 0.4,
+      ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {}),
+      response_format: { type: "json_schema", json_schema: { name: "result", strict: true, schema } },
+      messages: [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content: image ? [{ type: "text", text: user }, { type: "image_url", image_url: { url: `data:image/jpeg;base64,${image}` } }] : user,
+        },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`groq ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  return JSON.parse((await res.json()).choices[0].message.content);
+}
+
+// Gemini: free tier with a Google account. JSON mode, with the schema spelled out in the instructions.
+async function askGemini({ system, user, schema, image }) {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`, {
+    method: "POST",
+    headers: { "x-goog-api-key": process.env.GEMINI_API_KEY, "content-type": "application/json" },
+    signal: AbortSignal.timeout(45_000),
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: `${system}\n\nRespond with only a JSON object that matches this JSON Schema:\n${JSON.stringify(schema)}` }] },
+      contents: [{ role: "user", parts: [{ text: user }, ...(image ? [{ inline_data: { mime_type: "image/jpeg", data: image } }] : [])] }],
+      generationConfig: { responseMimeType: "application/json", temperature: 0.4 },
+    }),
+  });
+  if (!res.ok) throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.filter((p) => !p.thought).map((p) => p.text || "").join("");
+  if (!text) throw new Error(`gemini returned no text (${data.candidates?.[0]?.finishReason || data.promptFeedback?.blockReason || "unknown"})`);
+  return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+}
+
+const ASK = { ollama: askOllama, claude: askClaude, groq: askGroq, gemini: askGemini };
 async function ask(backend, req) {
-  return backend === "ollama" ? askOllama(req) : askClaude(req);
+  return ASK[backend](req);
 }
 
 const cleanTone = (t, fallback = "neutral") => (TONES.includes(t) ? t : fallback);
@@ -149,7 +202,7 @@ async function describe({ label, score, image, lang: rawLang }) {
   const img = typeof image === "string" && image.length < 2_000_000 ? image.replace(/^data:image\/\w+;base64,/, "") : null;
   if (backend !== "rules") {
     try {
-      const sees = backend === "claude" || OLLAMA_SEES;
+      const sees = backend !== "ollama" || OLLAMA_SEES;
       const raw = await ask(backend, {
         system: DESCRIBE_SYSTEM,
         user: buildDescribePrompt({ label, score, lang, wiki: wiki?.extract, hasImage: Boolean(img && sees) }),
@@ -239,6 +292,48 @@ async function speak({ text, tone, voice }) {
   }
 }
 
+// ---------- in-app key setup ----------
+
+const CONFIG_KEYS = { groq: "GROQ_API_KEY", gemini: "GEMINI_API_KEY", claude: "ANTHROPIC_API_KEY", elevenlabs: "ELEVENLABS_API_KEY" };
+
+// Cheap authenticated calls that confirm a key works before it's saved.
+async function verifyKey(provider, key) {
+  const checks = {
+    groq: () => fetch("https://api.groq.com/openai/v1/models", { headers: { authorization: `Bearer ${key}` } }),
+    gemini: () => fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { headers: { "x-goog-api-key": key } }),
+    claude: () => fetch("https://api.anthropic.com/v1/models?limit=1", { headers: { "x-api-key": key, "anthropic-version": "2023-06-01" } }),
+  };
+  if (!checks[provider]) return true; // ElevenLabs keys can be scoped so tightly that no read endpoint works; trust it
+  const res = await checks[provider]().catch(() => null);
+  if (!res) throw Object.assign(new Error("Couldn't reach the provider. Check your internet connection."), { status: 502 });
+  if (res.status === 401 || res.status === 403 || res.status === 400) throw Object.assign(new Error("That key was rejected. Copy it again and paste the whole key."), { status: 400 });
+  return true;
+}
+
+async function saveEnv(name, value) {
+  let lines = [];
+  try {
+    lines = (await readFile(ENV_FILE, "utf8")).split("\n");
+  } catch {
+    try {
+      lines = (await readFile(path.join(here, ".env.example"), "utf8")).split("\n");
+    } catch {}
+  }
+  const line = `${name}=${value}`;
+  const i = lines.findIndex((l) => l.startsWith(`${name}=`));
+  if (i >= 0) lines[i] = line;
+  else lines.push(line);
+  await writeFile(ENV_FILE, lines.join("\n").replace(/\n*$/, "\n"), { mode: 0o600 });
+  if (value) process.env[name] = value;
+  else delete process.env[name];
+}
+
+// Only this app's own page may change keys (blocks other websites from posting to localhost).
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  return !origin || origin === `http://localhost:${PORT}` || origin === `http://127.0.0.1:${PORT}`;
+}
+
 // ---------- http ----------
 
 function sendJson(res, status, body) {
@@ -277,9 +372,10 @@ const server = http.createServer(async (req, res) => {
       const [backend, ollama] = await Promise.all([pickBackend(), ollamaStatus()]);
       return sendJson(res, 200, {
         llm: backend,
-        llmModel: backend === "ollama" ? OLLAMA_MODEL : backend === "claude" ? CLAUDE_MODEL : null,
-        vision: backend === "claude" || (backend === "ollama" && OLLAMA_SEES),
+        llmModel: MODEL_FOR[backend]?.() ?? null,
+        vision: backend !== "rules" && (backend !== "ollama" || OLLAMA_SEES),
         ollama: { ...ollama, model: OLLAMA_MODEL },
+        keys: Object.fromEntries(Object.entries(CONFIG_KEYS).map(([k, v]) => [k, Boolean(process.env[v])])),
         claude: Boolean(process.env.ANTHROPIC_API_KEY),
         voice: process.env.ELEVENLABS_API_KEY ? "elevenlabs" : "browser",
         voiceModel: process.env.ELEVENLABS_API_KEY ? ELEVEN_MODEL : null,
@@ -295,6 +391,18 @@ const server = http.createServer(async (req, res) => {
       const payload = await readJson(req, 3 * 1024 * 1024);
       if (!payload.label) return sendJson(res, 400, { error: "no label" });
       return sendJson(res, 200, await describe(payload));
+    }
+    if (req.method === "POST" && req.url === "/api/config") {
+      if (!sameOrigin(req)) return sendJson(res, 403, { error: "forbidden" });
+      const { provider, key } = await readJson(req);
+      const name = CONFIG_KEYS[provider];
+      if (!name) return sendJson(res, 400, { error: "unknown provider" });
+      const value = String(key || "").trim();
+      if (value && !/^[\w.\-:]{16,256}$/.test(value)) return sendJson(res, 400, { error: "That doesn't look like an API key." });
+      if (value) await verifyKey(provider, value);
+      await saveEnv(name, value);
+      console.log(`[config] ${value ? "saved" : "removed"} ${name}`);
+      return sendJson(res, 200, { ok: true, llm: await pickBackend() });
     }
     if (req.method === "POST" && req.url === "/api/speak") {
       if (!process.env.ELEVENLABS_API_KEY) return sendJson(res, 501, { error: "no ElevenLabs key; use browser voice" });
