@@ -553,8 +553,12 @@ input:focus { outline: none; border-color: rgba(92, 242, 255, 0.6); box-shadow: 
 }
 @media (max-width: 560px) {
   .features, .steps { grid-template-columns: 1fr; }
-  .hud-face { max-width: 55%; }
-  .hud-pred { min-width: 130px; }
+  /* phones: the emotion card shrinks to just the orb (+ grammar chips) so it never covers the sign card */
+  .hud-pred { min-width: 0; top: 12px; left: 12px; }
+  .hud-face { top: 12px; right: 12px; padding: 8px; max-width: 96px; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .hud-face .emotion { display: none; }
+  .hud-face .chips { justify-content: flex-end; }
+  .orb { width: 34px; height: 34px; }
   .seg button { padding: 6px 11px; }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -86,7 +86,9 @@ export class FingerspellRecognizer {
     let worst = null;
     for (const f of FINGERS) {
       const diff = curl(mine, f.chain) - curl(tpl, f.chain);
-      if (Math.abs(diff) > 0.7 && (!worst || Math.abs(diff) > Math.abs(worst.diff))) worst = { finger: f.name, diff };
+      // thumb angles are noisier in MediaPipe, so fingers get corrected first
+      const weight = f.name === "thumb" ? 0.55 : 1;
+      if (Math.abs(diff) > 0.7 && (!worst || Math.abs(diff) * weight > Math.abs(worst.diff) * worst.weight)) worst = { finger: f.name, diff, weight };
     }
     if (worst) return worst.diff > 0 ? `Straighten your ${worst.finger}` : `Curl your ${worst.finger} more`;
     // orientation: where the hand points (wrist → middle knuckle), mirror-independent

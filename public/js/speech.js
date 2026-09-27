@@ -52,11 +52,13 @@ export async function pickBrowserVoice(lang) {
   const base = tag.split("-")[0];
   const rank = (v) =>
     (v.lang === tag ? 4 : v.lang.startsWith(base) ? 2 : 0) +
-    (/-IN$/i.test(v.lang) ? 2 : 0) +
+    (/-IN$/i.test(v.lang) ? 3 : 0) +
     (FEMALE.test(v.name) ? 3 : 0) -
     (MALE.test(v.name) ? 5 : 0) +
     (v.localService ? 0 : 1); // network voices usually sound better
-  return voices.filter((v) => v.lang.startsWith(base) || (lang === "hinglish" && v.lang.startsWith("hi"))).sort((a, b) => rank(b) - rank(a))[0] || null;
+  // any Indian voice qualifies: if there's no Indian-English voice, a Hindi voice (e.g. macOS "Lekha")
+  // reads English with an Indian accent, which is closer to what users here want than en-US/en-AU
+  return voices.filter((v) => v.lang.startsWith(base) || /-IN$/i.test(v.lang)).sort((a, b) => rank(b) - rank(a))[0] || null;
 }
 
 const stripTags = (s) => s.replace(/\[[a-z][a-z ]{1,24}\]\s*/gi, "").trim();
