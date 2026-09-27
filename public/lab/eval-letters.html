@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fingerspelling Evaluation</title>
+    <style>
+      :root { color-scheme: dark; --bg: #07080d; --text: #e9ecf3; --muted: #8b93a7; --ok: #2ee6a6; --bad: #ff5d7a; }
+      body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+      main { max-width: 900px; margin: 0 auto; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      p { color: var(--muted); }
+      pre { background: #12151e; border: 1px solid #242938; border-radius: 12px; padding: 12px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Fingerspelling model · independent photo test</h1>
+      <p>ASL alphabet photos from a different source than the training data (huggingface.co/datasets/Keithsel/asl_signs). Each photo goes through MediaPipe HandLandmarker, then the app's classifier. Also compares horizontal-scale conventions, since the training data doesn't record its camera's aspect ratio.</p>
+      <pre id="out">running…</pre>
+    </main>
+    <script type="module">
+      import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
+      import { normalize, features, standardize, mlpForward } from "/js/fingerspell-features.js";
+
+      const HF = "https://huggingface.co/datasets/Keithsel/asl_signs/resolve/main/";
+      const out = document.getElementById("out");
+      const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm");
+      const hands = await HandLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" },
+        runningMode: "IMAGE",
+        numHands: 1,
+        minHandDetectionConfidence: 0.3,
+      });
+      const model = await (await fetch("/models/fingerspelling.json")).json();
+      const items = await (await fetch("/lab/alphabet-photos.json")).json();
+      const FACTORS = [0.5625, 0.75, 1, 1.333];
+      const R = (window.LETTERS = { n: 0, noHand: 0, failed: 0, byFactor: Object.fromEntries(FACTORS.map((f) => [f, { ok: 0, ok3: 0 }])), wrong: [], finished: false });
+      for (const it of items) {
+        let bmp;
+        for (let a = 0; a < 5 && !bmp; a++) {
+          const res = await fetch(HF + it.path).catch(() => null);
+          if (res?.ok) bmp = await createImageBitmap(await res.blob());
+          else await new Promise((r) => setTimeout(r, 1500 * (a + 1)));
+        }
+        if (!bmp) { R.failed++; continue; }
+        const det = hands.detect(bmp);
+        const lm = det.landmarks?.[0];
+        if (!lm) { R.noHand++; continue; }
+        R.n++;
+        const aspect = bmp.width / bmp.height;
+        for (const f of FACTORS) {
+          // square-pixel coordinates, then scaled by the candidate convention
+          const pts = lm.map((p) => [p.x * aspect * f, p.y, p.z * aspect * f]);
+          const probs = mlpForward(model, standardize(model, features(normalize(pts))));
+          const ranked = probs.map((p, i) => [p, model.labels[i]]).sort((a, b) => b[0] - a[0]);
+          if (ranked[0][1] === it.label) R.byFactor[f].ok++;
+          else if (f === 0.75) R.wrong.push(`${it.label}→${ranked[0][1]}`);
+          if (ranked.slice(0, 3).some((r) => r[1] === it.label)) R.byFactor[f].ok3++;
+        }
+        out.textContent = `${R.n} photos with a detected hand (${R.noHand} no hand, ${R.failed} failed)\n` +
+          FACTORS.map((f) => `x-scale ${f}: top-1 ${((R.byFactor[f].ok / R.n) * 100).toFixed(1)}%  top-3 ${((R.byFactor[f].ok3 / R.n) * 100).toFixed(1)}%`).join("\n");
+      }
+      R.finished = true;
+      out.textContent += `\n\nmistakes (x-scale 0.75): ${R.wrong.join(", ")}`;
+    </script>
+  </body>
+</html>

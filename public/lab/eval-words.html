@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Word Model Evaluation</title>
+    <style>
+      :root { color-scheme: dark; --bg: #07080d; --text: #e9ecf3; --muted: #8b93a7; --ok: #2ee6a6; --bad: #ff5d7a; }
+      body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+      main { max-width: 900px; margin: 0 auto; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      p { color: var(--muted); margin: 0 0 16px; }
+      .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 16px 0; }
+      .stat { background: #12151e; border: 1px solid #242938; border-radius: 12px; padding: 12px; }
+      .stat b { display: block; font-size: 26px; }
+      .stat span { color: var(--muted); font-size: 12px; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #1c2130; }
+      .ok { color: var(--ok); } .bad { color: var(--bad); }
+      video { width: 240px; border-radius: 8px; background: #000; }
+      button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 0; background: var(--ok); color: #04130d; font-weight: 600; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>250-word ASL model · out-of-distribution test</h1>
+      <p>Runs the app's exact pipeline (MediaPipe Face + Hands → 543-point frames → model) on WLASL test/val clips: different signers and cameras from the model's training data. Videos stream from Hugging Face; nothing is stored.</p>
+      <button id="go">Run evaluation</button>
+      <div class="stats" id="stats"></div>
+      <video id="v" muted playsinline crossorigin="anonymous"></video>
+      <table><thead><tr><th>#</th><th>Truth</th><th>Prediction</th><th>Top-5</th><th>Frames</th></tr></thead><tbody id="rows"></tbody></table>
+    </main>
+    <script type="module">
+      import { createTrackers } from "/js/vision.js";
+      import { WordRecognizer } from "/js/asl-words.js";
+
+      const HF = "https://huggingface.co/datasets/Voxel51/WLASL/resolve/main/";
+      const params = new URLSearchParams(location.search);
+      const limit = Number(params.get("n") || 1e9);
+      const video = document.getElementById("v");
+      const probe = Object.assign(document.createElement("canvas"), { width: 32, height: 18 });
+      let ts = 0;
+      const R = (window.EVAL = { done: 0, total: 0, variants: {}, rows: [], errors: 0, reasons: {}, running: false });
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      function stats() {
+        const cards = Object.entries(R.variants).map(([name, v]) => {
+          const n = Math.max(v.n, 1);
+          return `<div class="stat"><b>${((v.top1 / n) * 100).toFixed(1)}%</b><span>top-1 · ${name}</span></div>
+                  <div class="stat"><b>${((v.top5 / n) * 100).toFixed(1)}%</b><span>top-5 · ${name}</span></div>`;
+        });
+        document.getElementById("stats").innerHTML = cards.join("") + `<div class="stat"><b>${R.done}/${R.total}</b><span>clips · skipped: ${Object.entries(R.reasons).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}</span></div>`;
+      }
+
+      const seek = (t) => new Promise((ok) => { video.onseeked = ok; video.currentTime = t; });
+
+      async function framesOf(item, trackers) {
+        // download first (with backoff: the Hub rate-limits bursts), then decode from memory
+        let blob = null;
+        for (let a = 0; a < 6 && !blob; a++) {
+          const res = await fetch(HF + item.path).catch(() => null);
+          if (res?.ok) blob = await res.blob();
+          else await sleep(2000 * (a + 1));
+        }
+        if (!blob) throw new Error("download failed");
+        if (video.src.startsWith("blob:")) URL.revokeObjectURL(video.src);
+        video.src = URL.createObjectURL(blob);
+        await new Promise((ok, err) => { video.onloadeddata = ok; video.onerror = () => err(new Error("unsupported format")); });
+        const fps = 25; // WLASL clips are 25–30 fps; stepping at 25 matches typical phone capture
+        const out = { app: [] };
+        // some WLASL files use codecs this browser can't decode (every frame black): skip, don't score
+        await seek(video.duration / 2);
+        probe.getContext("2d").drawImage(video, 0, 0, 32, 18);
+        const px = probe.getContext("2d").getImageData(0, 0, 32, 18).data;
+        let sum = 0;
+        for (let i = 0; i < px.length; i += 4) sum += px[i] + px[i + 1] + px[i + 2];
+        if (sum / (px.length / 4) / 3 < 2) throw new Error("undecodable (black frames)");
+        ts += 1000;
+        for (let t = 0; t < video.duration; t += 1 / fps) {
+          await seek(t);
+          ts += 1000 / fps;
+          const hands = trackers.hands.detectForVideo(video, ts);
+          const face = trackers.face.detectForVideo(video, ts);
+          out.app.push(WordRecognizer.frame(hands, face));
+        }
+        return out;
+      }
+
+      async function run() {
+        if (R.running) return;
+        R.running = true;
+        const items = (await (await fetch("/lab/wlasl-eval-set.json")).json()).slice(0, limit);
+        R.total = items.length;
+        const [trackers, rec] = await Promise.all([createTrackers(), new WordRecognizer().init()]);
+        for (const [i, item] of items.entries()) {
+          try {
+            let f;
+            // if a tracker had to rebuild mid-clip, some frames were blank: wait for it and redo the clip
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const before = trackers.hands.errors + trackers.face.errors;
+              f = await framesOf(item, trackers);
+              if (trackers.hands.errors + trackers.face.errors === before) break;
+              while (!trackers.hands.ready() || !trackers.face.ready()) await sleep(100);
+              if (attempt === 2) throw new Error("tracker kept failing");
+            }
+            const row = { i, label: item.label, frames: f.app.length, hands: f.app.filter(WordRecognizer.hasHands).length };
+            for (const [name, frames] of Object.entries(f)) {
+              const top = await rec.predict(frames, 5);
+              const v = (R.variants[name] ??= { n: 0, top1: 0, top5: 0 });
+              v.n++;
+              if (top[0]?.word === item.label) v.top1++;
+              if (top.some((t) => t.word === item.label)) v.top5++;
+              row[name] = top;
+            }
+            R.rows.push(row);
+            const best = row.app;
+            const cls = best[0]?.word === item.label ? "ok" : "bad";
+            document.getElementById("rows").insertAdjacentHTML("afterbegin",
+              `<tr><td>${i + 1}</td><td>${item.label}</td><td class="${cls}">${best[0]?.word} ${((best[0]?.p || 0) * 100).toFixed(0)}%</td><td>${best.map((t) => t.word).join(", ")}</td><td>${row.hands}/${row.frames}</td></tr>`);
+          } catch (err) {
+            R.errors++;
+            R.reasons[err.message] = (R.reasons[err.message] || 0) + 1;
+          }
+          R.done++;
+          stats();
+        }
+        R.running = false;
+        R.finished = true;
+      }
+      document.getElementById("go").onclick = run;
+      if (params.has("auto")) run();
+    </script>
+  </body>
+</html>

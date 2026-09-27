@@ -1,17 +1,23 @@
 // Voice out (ElevenLabs via the server, or the browser's own voice) and speech in (live captions
 // of the hearing person's reply). Female voices by default, in English, Hindi and Hinglish.
 
-// ElevenLabs premade female voices
+// Female voices. Sarvam's are native Indian voices (Hindi, Indian English, Hinglish);
+// ElevenLabs premade voices are international.
 export const VOICES = [
-  { id: "EXAVITQu4vr4xnSDxMaL", name: "Sarah", note: "warm, soft" },
-  { id: "9BWtsMINqrJLrRacOk9x", name: "Aria", note: "expressive" },
-  { id: "cgSgspJ2msm6clMCkdW9", name: "Jessica", note: "bright, playful" },
-  { id: "pFZP5JQG7iQjIQuC4Bku", name: "Lily", note: "gentle, British" },
-  { id: "XB0fDUnXU5powFXDhCwa", name: "Charlotte", note: "calm" },
-  { id: "21m00Tcm4TlvDq8ikWAM", name: "Rachel", note: "clear, neutral" },
+  { id: "sarvam:priya", name: "Priya", provider: "sarvam" },
+  { id: "sarvam:neha", name: "Neha", provider: "sarvam" },
+  { id: "sarvam:kavya", name: "Kavya", provider: "sarvam" },
+  { id: "sarvam:shreya", name: "Shreya", provider: "sarvam" },
+  { id: "sarvam:ishita", name: "Ishita", provider: "sarvam" },
+  { id: "sarvam:ritu", name: "Ritu", provider: "sarvam" },
+  { id: "eleven:EXAVITQu4vr4xnSDxMaL", name: "Sarah", provider: "elevenlabs" },
+  { id: "eleven:9BWtsMINqrJLrRacOk9x", name: "Aria", provider: "elevenlabs" },
+  { id: "eleven:cgSgspJ2msm6clMCkdW9", name: "Jessica", provider: "elevenlabs" },
+  { id: "eleven:XB0fDUnXU5powFXDhCwa", name: "Charlotte", provider: "elevenlabs" },
 ];
 
-export const LANG_TAG = { en: "en-US", hi: "hi-IN", hinglish: "en-IN" };
+// Indian English first: the browser fallback should sound Indian too
+export const LANG_TAG = { en: "en-IN", hi: "hi-IN", hinglish: "en-IN" };
 
 const BROWSER_TONE = {
   neutral: { rate: 1, pitch: 1.05 },
@@ -46,6 +52,7 @@ export async function pickBrowserVoice(lang) {
   const base = tag.split("-")[0];
   const rank = (v) =>
     (v.lang === tag ? 4 : v.lang.startsWith(base) ? 2 : 0) +
+    (/-IN$/i.test(v.lang) ? 2 : 0) +
     (FEMALE.test(v.name) ? 3 : 0) -
     (MALE.test(v.name) ? 5 : 0) +
     (v.localService ? 0 : 1); // network voices usually sound better
@@ -82,7 +89,7 @@ export async function speak(text, { tone = "neutral", lang = "en", voice, onStar
     const res = await fetch("/api/speak", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, tone, voice }),
+      body: JSON.stringify({ text, tone, voice, lang }),
     });
     if (current !== session) return "cancelled";
     if (res.ok) {

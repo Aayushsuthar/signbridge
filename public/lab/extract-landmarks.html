@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Landmark Extraction</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; padding: 24px 16px; background: #07080d; color: #e9ecf3; font: 14px/1.5 system-ui, sans-serif; }
+      main { max-width: 800px; margin: 0 auto; }
+      p, code { color: #8b93a7; }
+      pre { background: #12151e; border: 1px solid #242938; border-radius: 12px; padding: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Hand landmark extraction</h1>
+      <p>Turns an image-classification parquet (Hugging Face <code>image</code> + <code>label</code> columns) into MediaPipe hand landmarks for <code>scripts/train-fingerspelling.mjs</code>, using the same HandLandmarker as the app. Output rows: <code>{ label, pts: [[x,y,z]×21] }</code> in square-pixel units.</p>
+      <p>Params: <code>?src=&lt;parquet url&gt;&amp;labels=A,B,…&amp;post=&lt;collector url&gt;</code> (without <code>post</code>, a JSON file is offered for download at the end).</p>
+      <pre id="out">starting…</pre>
+    </main>
+    <script type="module">
+      import { asyncBufferFromUrl, parquetMetadataAsync, parquetReadObjects } from "https://cdn.jsdelivr.net/npm/hyparquet@1.31.2/+esm";
+      import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
+
+      const q = new URLSearchParams(location.search);
+      const src = q.get("src");
+      const labels = (q.get("labels") || "ABCDEFGHIJKLMNOPQRSTUVWXYZ").split(/,?/).filter(Boolean);
+      const post = q.get("post");
+      const out = document.getElementById("out");
+      const S = (window.EXTRACT = { rows: 0, total: 0, hands: 0, noHand: 0, done: false });
+
+      const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm");
+      const detector = await HandLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate: "GPU" },
+        runningMode: "IMAGE",
+        numHands: 1,
+        minHandDetectionConfidence: 0.3,
+      });
+
+      const file = await asyncBufferFromUrl({ url: src });
+      const meta = await parquetMetadataAsync(file);
+      S.total = Number(meta.num_rows);
+      const all = [];
+      const CHUNK = 200;
+      for (let start = 0; start < S.total; start += CHUNK) {
+        const rows = await parquetReadObjects({ file, metadata: meta, rowStart: start, rowEnd: Math.min(start + CHUNK, S.total), utf8: false });
+        const batch = [];
+        for (const row of rows) {
+          S.rows++;
+          const bytes = row.image?.bytes;
+          if (!bytes) continue;
+          let bmp;
+          try {
+            bmp = await createImageBitmap(new Blob([bytes]));
+          } catch {
+            continue;
+          }
+          const lm = detector.detect(bmp).landmarks?.[0];
+          const aspect = bmp.width / bmp.height;
+          bmp.close();
+          if (!lm) {
+            S.noHand++;
+            continue;
+          }
+          S.hands++;
+          batch.push({ label: labels[Number(row.label)], pts: lm.map((p) => [+(p.x * aspect).toFixed(5), +p.y.toFixed(5), +(p.z * aspect).toFixed(5)]) });
+        }
+        if (post) await fetch(post, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(batch) });
+        else all.push(...batch);
+        out.textContent = `${S.rows}/${S.total} images · ${S.hands} hands found · ${S.noHand} without a detectable hand`;
+      }
+      S.done = true;
+      out.textContent += "\ndone";
+      if (!post) {
+        const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([JSON.stringify(all)])), download: "landmarks.json", textContent: "Download landmarks.json" });
+        document.querySelector("main").append(a);
+      }
+    </script>
+  </body>
+</html>

@@ -105,6 +105,12 @@
             <div class="scanline" aria-hidden="true"></div>
 
             <div class="hud hud-pred glass" id="hud-pred">
+              <div class="seg seg-xs" id="source-seg" role="tablist" aria-label="What to recognise">
+                <span class="seg-pill"></span>
+                <button data-source="words" aria-selected="true" title="250 ASL words, no training needed">Words</button>
+                <button data-source="letters" aria-selected="false" title="Fingerspelling A–Z, no training needed">Letters</button>
+                <button data-source="custom" aria-selected="false" title="Signs you recorded yourself">My signs</button>
+              </div>
               <div class="hud-kicker" id="pred-kicker">Sign</div>
               <div class="hud-label" id="pred-label">—</div>
               <div class="bar"><div class="bar-fill" id="pred-bar"></div></div>
@@ -152,7 +158,7 @@
             <button data-tab="chat" aria-selected="true">Chat</button>
             <button data-tab="objects" aria-selected="false">Objects</button>
             <button data-tab="train" aria-selected="false">Train</button>
-            <button data-tab="practice" aria-selected="false">Practice</button>
+            <button data-tab="practice" aria-selected="false">Learn</button>
             <button data-tab="settings" aria-selected="false">⚙︎</button>
           </nav>
 
@@ -181,8 +187,10 @@
               <h2>Objects</h2>
               <span class="count" id="obj-count"></span>
             </div>
-            <p class="fine">Switch to 🔍 Objects mode and tap anything the camera sees.</p>
+            <p class="fine">Switch to 🔍 Objects mode and tap anything the camera sees. With an AI connected, steady objects get a precise ✨ name.</p>
             <div class="obj-list" id="obj-list"></div>
+            <button class="btn-glass xs" id="scan-btn">✨ What's in view?</button>
+            <div class="obj-list scan-list" id="scan-list"></div>
             <article class="obj-card" id="obj-card" hidden>
               <div class="obj-card-top">
                 <img id="obj-img" alt="" />
@@ -230,11 +238,20 @@
 
           <!-- PRACTICE -->
           <div class="tab-panel practice" data-panel="practice" hidden>
-            <h2>Practice</h2>
-            <p class="fine">Sign the word shown. Good for learning, and for finding signs that need more training.</p>
+            <h2>Learn sign language</h2>
+            <div class="seg seg-sm learn-seg" id="learn-seg" role="tablist" aria-label="Lesson">
+              <span class="seg-pill"></span>
+              <button data-lesson="letters" aria-selected="true">Alphabet</button>
+              <button data-lesson="words" aria-selected="false">Words</button>
+              <button data-lesson="custom" aria-selected="false">My signs</button>
+            </div>
             <div class="practice-ring">
+              <canvas class="learn-hand" id="learn-hand" width="190" height="190" aria-hidden="true"></canvas>
               <div class="practice-target" id="practice-target">—</div>
             </div>
+            <p class="learn-tip" id="learn-tip"></p>
+            <a class="btn-glass xs learn-watch" id="learn-watch" target="_blank" rel="noopener" hidden>▶ Watch a signer</a>
+            <div class="bar learn-meter"><div class="bar-fill" id="learn-meter"></div></div>
             <div class="practice-feedback" id="practice-feedback"></div>
             <div class="practice-score">Score <b id="practice-score">0</b> · Streak <b id="practice-streak">0</b></div>
             <div class="row center">

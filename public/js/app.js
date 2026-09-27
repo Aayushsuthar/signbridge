@@ -4,7 +4,9 @@ import { SignClassifier } from "./classifier.js";
 import { FaceAnalyzer, MARKER_LABEL } from "./face.js";
 import { speak, stopSpeaking, createListener, VOICES } from "./speech.js";
 import { markChanges } from "./diff.js";
-import { createObjectDetector, ObjectTracker, boxToStage, cropObject } from "./objects.js";
+import { createObjectDetector, ObjectTracker, boxToStage, cropObject, snapshot } from "./objects.js";
+import { WordRecognizer, WordStream, glossOf, videoFor } from "./asl-words.js";
+import { FingerspellRecognizer, LETTER_TIPS } from "./fingerspell.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...children) => {
@@ -34,7 +36,8 @@ const ANNOUNCE = {
 const PROVIDERS = [
   { id: "groq", name: "Groq", tag: "Free · fastest", how: "Sign up with email, then create a key at", link: "https://console.groq.com/keys", ph: "gsk_…" },
   { id: "gemini", name: "Google Gemini", tag: "Free · Google account", how: "Sign in with Google and click “Create API key” at", link: "https://aistudio.google.com/apikey", ph: "AIza…" },
-  { id: "elevenlabs", name: "ElevenLabs voice", tag: "Free tier", how: "Expressive female voice. Create a key at", link: "https://elevenlabs.io/app/settings/api-keys", ph: "sk_…" },
+  { id: "sarvam", name: "Sarvam AI voice", tag: "Indian voices", how: "Natural Indian female voices for English, हिन्दी & Hinglish. Sign up and create a key at", link: "https://dashboard.sarvam.ai", ph: "your Sarvam key" },
+  { id: "elevenlabs", name: "ElevenLabs voice", tag: "Free tier", how: "Expressive international voices. Create a key at", link: "https://elevenlabs.io/app/settings/api-keys", ph: "sk_…" },
   { id: "claude", name: "Claude", tag: "Paid", how: "Best quality. Create a key at", link: "https://console.anthropic.com/settings/keys", ph: "sk-ant-…" },
 ];
 const LLM_NAME = { ollama: "Ollama", claude: "Claude", groq: "Groq", gemini: "Gemini" };
@@ -69,10 +72,13 @@ const state = {
   transcript: [],
   recording: null,
   practice: { active: false, target: null, score: 0, streak: 0 },
-  objects: { visible: [], selected: null, announced: new Map(), lastPanel: 0, describing: 0 },
+  words: { rec: null, stream: null, loading: false, lastTop: null },
+  letters: { rec: null, preds: [], locked: null, spelling: "" },
+  learn: { lesson: "letters", target: null, hold: 0, hintAt: 0, mastered: new Set() },
+  objects: { visible: [], selected: null, announced: new Map(), lastPanel: 0, describing: 0, identifying: false, lastIdentify: 0 },
   speaking: false,
   status: null,
-  opts: { auto: true, speak: true, mesh: true, announce: false, pause: 1600, lang: "en", voice: VOICES[0].id },
+  opts: { auto: true, speak: true, mesh: true, announce: false, pause: 1600, lang: "en", voice: VOICES[0].id, source: "words" },
 };
 
 const bg = startBackground($("bg"));
@@ -105,6 +111,7 @@ function loadOpts() {
   for (const [id, key] of [["opt-auto", "auto"], ["opt-speak", "speak"], ["opt-mesh", "mesh"], ["opt-announce", "announce"]]) $(id).checked = state.opts[key];
   $("opt-pause").value = state.opts.pause;
   $("opt-pause-val").textContent = `${(state.opts.pause / 1000).toFixed(1)}s`;
+  if (state.opts.voice && !state.opts.voice.includes(":")) state.opts.voice = `eleven:${state.opts.voice}`; // pre-0.4 setting
   if (state.opts.tolerance) classifier.tolerance = state.opts.tolerance;
   $("tolerance").value = classifier.tolerance;
   $("tolerance-val").textContent = classifier.tolerance.toFixed(1);
@@ -209,12 +216,14 @@ async function refreshStatus() {
           : "No AI connected. Add a free Groq or Gemini key in ⚙ Settings."
         : `Translator${s.vision ? " (can see objects)" : ""}`;
     const voice = $("status-voice");
-    voice.lastChild.textContent = s.voice === "elevenlabs" ? "ElevenLabs" : "Browser voice";
-    voice.className = `pill ${s.voice === "elevenlabs" ? "ok" : ""}`;
+    voice.lastChild.textContent = { sarvam: "Sarvam · Indian", elevenlabs: "ElevenLabs" }[s.voice] || "Browser voice";
+    voice.className = `pill ${s.voice !== "browser" ? "ok" : ""}`;
     $("voice-hint").textContent =
-      s.voice === "elevenlabs"
-        ? `ElevenLabs · ${s.voiceModel}${s.voiceModel?.startsWith("eleven_v3") ? " (emotion tags on)" : ""}. Tap a voice to hear it.`
-        : "Add a free ElevenLabs key above to use these expressive voices. Until then your browser's best female voice speaks.";
+      s.voice === "browser"
+        ? "Add a Sarvam key above for natural Indian voices (or ElevenLabs). Until then your browser's Indian-English female voice speaks."
+        : "Tap a voice to hear it. Voices marked “needs key” use your browser voice until that service is connected.";
+    state.voicesAvailable = s.voices || {};
+    renderVoices();
     $("setup-nudge").hidden = s.llm !== "rules";
     renderProviders(s);
   } catch {
@@ -253,13 +262,14 @@ async function start() {
     scrollTo(0, 0);
     bg.setGlow(0.5);
     requestAnimationFrame(() => document.querySelectorAll(".seg").forEach(positionPill));
+    $("pred-kicker").textContent = { words: "ASL words · 250", letters: "Fingerspelling A–Z", custom: "My signs" }[state.opts.source];
     document.fonts?.ready.then(() => document.querySelectorAll(".seg").forEach(positionPill));
 
     const pill = $("status-vision");
     pill.lastChild.textContent = `Vision · ${trackers.delegate}`;
     pill.className = "pill ok";
     requestAnimationFrame(loop);
-    if (!classifier.samples.length) toast("No signs trained yet. Open Train to record your first few, or try 🔍 Objects.", 5500);
+    loadSignModels();
   } catch (err) {
     console.error(err);
     btn.disabled = false;
@@ -301,9 +311,140 @@ function signFrame(video, now) {
   const faceState = face.update(faceRes, now);
   const { vec, count } = features.frame(hands, faceRes, video.videoWidth / video.videoHeight);
   state.overlay.render(hands, faceRes, { showFace: state.opts.mesh });
+  const aspect = video.videoWidth / video.videoHeight;
   if (state.recording) recordFrame(vec, count, now);
-  else recognise(vec, count, now);
+  else if (state.tab === "practice" && state.learn.lesson !== "custom") learnFrame(hands, faceRes, now, aspect);
+  else if (state.opts.source === "custom" || state.tab === "practice") recognise(vec, count, now);
+  else {
+    if (state.opts.source === "letters") lettersFrame(hands, now, aspect);
+    else wordsFrame(hands, faceRes, now);
+    handsPresence(handCount, now);
+  }
   renderFace(faceState);
+}
+
+// ---------- pretrained sign models ----------
+
+async function loadSignModels() {
+  state.words.loading = true;
+  try {
+    state.letters.rec = await new FingerspellRecognizer().init();
+  } catch (err) {
+    console.error("fingerspelling model failed to load", err);
+  }
+  try {
+    state.words.rec = await new WordRecognizer().init();
+    state.words.stream = new WordStream(state.words.rec, { onWord: onWord, onGuess: onWordGuess });
+    toast("Ready: sign any of 250 ASL words, or fingerspell with Letters. No training needed. 🤟", 5000);
+  } catch (err) {
+    console.error("word model failed to load", err);
+    toast("The word model couldn't load in this browser. Letters and My signs still work.", 6000);
+  } finally {
+    state.words.loading = false;
+  }
+}
+
+function setSource(source) {
+  state.opts.source = source;
+  saveOpts();
+  selectIn($("source-seg"), "data-source", source);
+  state.preds = [];
+  state.locked = null;
+  state.words.stream?.reset();
+  state.letters.preds = [];
+  state.letters.locked = null;
+  flushSpelling();
+  $("pred-kicker").textContent = { words: "ASL words · 250", letters: "Fingerspelling A–Z", custom: "My signs" }[source];
+  if (source === "custom" && !classifier.samples.length) toast("You haven't recorded any signs yet. Open Train to add your own.");
+}
+
+// Word mode: stream frames into the 250-word model
+function wordsFrame(hands, faceRes, now) {
+  const w = state.words;
+  if (!w.stream) return setPred(w.loading ? "Loading word model…" : "Word model unavailable", true);
+  w.stream.push(WordRecognizer.frame(hands, faceRes), now);
+  if (!hands.landmarks?.length && !w.stream.busy) {
+    setPred(state.signs.length ? "Hands down" : "Sign a word", true);
+    $("pred-bar").style.width = "0";
+  }
+}
+
+function onWordGuess(top, final) {
+  state.words.lastTop = top;
+  if (state.tab === "practice" && state.learn.lesson === "words") return learnWordGuess(top, final);
+  if (state.tab !== "practice" && state.opts.source === "words") {
+    setPred(`${glossOf(top[0].word)}${top[0].p < 0.5 ? "?" : ""}`, top[0].p < 0.5, `also: ${top.slice(1, 3).map((t) => glossOf(t.word)).join(" · ")}`);
+    $("pred-bar").style.width = `${Math.round(top[0].p * 100)}%`;
+  }
+}
+
+function onWord(best, top) {
+  if (state.tab === "practice") return state.learn.lesson === "words" && learnWordCommit(best);
+  if (state.opts.source !== "words" || state.tab === "train") return;
+  commitSign(glossOf(best.word), top.map((t) => glossOf(t.word)));
+}
+
+// Letter mode: per-frame fingerspelling, letters build a word until the hands drop
+function lettersFrame(hands, now, aspect) {
+  const L = state.letters;
+  if (!L.rec) return setPred("Loading letters…", true);
+  const lm = hands.landmarks?.[0];
+  if (!lm) {
+    L.preds = [];
+    L.locked = null;
+    setPred(L.spelling ? `${L.spelling}…` : "Fingerspell a word", true);
+    $("pred-bar").style.width = "0";
+    return;
+  }
+  const top = L.rec.predict(lm, aspect, 3);
+  L.preds.push(top[0].p >= 0.55 ? top[0].letter : null);
+  if (L.preds.length > 10) L.preds.shift();
+  setPred(top[0].letter, top[0].p < 0.55, `${L.spelling ? `spelling ${L.spelling} · ` : ""}also ${top[1].letter}, ${top[2].letter}`);
+  $("pred-bar").style.width = `${Math.round(top[0].p * 100)}%`;
+  const counts = {};
+  for (const l of L.preds) if (l) counts[l] = (counts[l] || 0) + 1;
+  const [letter, n] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || [];
+  // double letters (e.g. the LL in HELLO): relax the hand briefly between them
+  if (L.locked && !L.preds.slice(-4).includes(L.locked)) L.locked = null;
+  if (letter && n >= 7 && letter !== L.locked) {
+    L.locked = letter;
+    L.spelling += letter;
+    const label = $("pred-label");
+    label.classList.remove("pop");
+    void label.offsetWidth;
+    label.classList.add("pop");
+    renderSigns();
+  }
+}
+
+function flushSpelling() {
+  const L = state.letters;
+  if (!L.spelling) return;
+  state.signs.push({ gloss: L.spelling, markers: face.recentMarkers(), spelled: true });
+  L.spelling = "";
+  renderSigns();
+}
+
+// Shared by every sign source: when the hands drop, finish the word/sentence
+function handsPresence(handCount, now) {
+  if (handCount) {
+    state.handsGoneAt = null;
+    $("hud-pause").hidden = true;
+    return true;
+  }
+  state.locked = null;
+  state.handsGoneAt ??= now;
+  const waited = now - state.handsGoneAt;
+  if (state.letters.spelling && waited > 500) flushSpelling();
+  if (!state.signs.length) face.resetSentence(); // idle: start the next sentence's face summary fresh
+  const busy = state.words.stream?.busy || state.words.stream?.frames.length;
+  const canAuto = state.opts.auto && state.tab !== "practice" && state.tab !== "train" && state.signs.length && !state.translating && !busy;
+  $("hud-pause").hidden = !canAuto;
+  if (canAuto) {
+    $("pause-ring").style.strokeDashoffset = String(94.25 * (1 - Math.min(waited / state.opts.pause, 1)));
+    if (waited >= state.opts.pause) finishSentence();
+  }
+  return false;
 }
 
 // ---------- mode switching ----------
@@ -335,7 +476,7 @@ async function setMode(mode) {
       }
     }
   } else {
-    $("pred-kicker").textContent = "Sign";
+    $("pred-kicker").textContent = { words: "ASL words · 250", letters: "Fingerspelling A–Z", custom: "My signs" }[state.opts.source];
     $("hud-face").hidden = false;
     objTracker.clear();
     renderObjects([]);
@@ -352,9 +493,10 @@ function objectsFrame(video, now) {
     state.objects.visible = objTracker.update(res, now);
   }
   renderObjects(state.objects.visible);
+  autoIdentify(video, now);
   const n = state.objects.visible.length;
   const top = [...state.objects.visible].sort((a, b) => b.score - a.score)[0];
-  setPred(top ? top.label : "Looking…", !top, top ? `${n} object${n === 1 ? "" : "s"} · tap one` : "point the camera at something");
+  setPred(top ? nameOf(top) : "Looking…", !top, top ? `${n} object${n === 1 ? "" : "s"} · tap one` : "point the camera at something");
   $("pred-bar").style.width = top ? `${Math.round(top.score * 100)}%` : "0";
 
   if (now - state.objects.lastPanel > 300) {
@@ -362,6 +504,30 @@ function objectsFrame(video, now) {
     renderObjectList();
     if (state.opts.announce) announceNew(now);
   }
+}
+
+const nameOf = (t) => t.aiName || t.label;
+
+// Once an object has been steady for a moment, ask a vision model for its precise name
+// (one request at a time, a few seconds apart, once per tracked object).
+async function autoIdentify(video, now) {
+  const O = state.objects;
+  if (!state.status?.vision || O.identifying || now - O.lastIdentify < 2500) return;
+  const t = O.visible.find((x) => x.hits >= 12 && !x.aiTried);
+  if (!t) return;
+  t.aiTried = true;
+  O.identifying = true;
+  O.lastIdentify = now;
+  try {
+    const res = await fetch("/api/identify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ image: cropObject(video, t.box).base64, label: t.label }),
+    });
+    const data = await res.json();
+    if (res.ok && data.sure && data.name) t.aiName = data.name;
+  } catch {}
+  O.identifying = false;
 }
 
 const objEls = new Map();
@@ -374,7 +540,7 @@ function renderObjects(tracks) {
     live.add(t.id);
     let node = objEls.get(t.id);
     if (!node) {
-      node = el("div", { className: "obj", title: `Tap to learn about this ${t.label}` }, el("span", { className: "obj-tag" }));
+      node = el("div", { className: "obj", title: "Tap to learn about this" }, el("span", { className: "obj-tag" }));
       node.onclick = () => describe(t);
       layer.append(node);
       objEls.set(t.id, node);
@@ -386,9 +552,11 @@ function renderObjects(tracks) {
     node.classList.toggle("selected", state.objects.selected === t.id);
     const tag = node.firstChild;
     const pct = Math.round(t.score * 100);
-    if (tag.dataset.v !== `${t.label}${pct}`) {
-      tag.dataset.v = `${t.label}${pct}`;
-      tag.replaceChildren(t.label, el("b", { textContent: `${pct}%` }));
+    const name = nameOf(t);
+    if (tag.dataset.v !== `${name}${pct}`) {
+      tag.dataset.v = `${name}${pct}`;
+      tag.classList.toggle("ai", Boolean(t.aiName));
+      tag.replaceChildren(t.aiName ? `✨ ${name}` : name, el("b", { textContent: `${pct}%` }));
     }
   }
   for (const [id, node] of objEls) {
@@ -400,16 +568,16 @@ function renderObjects(tracks) {
 }
 
 function renderObjectList() {
-  const labels = [...new Map(state.objects.visible.map((t) => [t.label, t])).values()];
+  const labels = [...new Map(state.objects.visible.map((t) => [nameOf(t), t])).values()];
   $("obj-count").textContent = labels.length ? `${labels.length} in view` : "";
   const list = $("obj-list");
-  const key = labels.map((t) => t.label).join("|");
+  const key = labels.map(nameOf).join("|");
   if (list.dataset.key === key) return;
   list.dataset.key = key;
   list.replaceChildren(
     ...labels.map((t) => {
-      const b = el("button", { type: "button", textContent: t.label });
-      b.onclick = () => describe(state.objects.visible.find((v) => v.label === t.label) || t);
+      const b = el("button", { type: "button", textContent: nameOf(t) });
+      b.onclick = () => describe(state.objects.visible.find((v) => nameOf(v) === nameOf(t)) || t);
       return b;
     }),
   );
@@ -421,9 +589,37 @@ function announceNew(now) {
     const last = state.objects.announced.get(t.label) || 0;
     if (t.hits >= 10 && now - last > 25000) {
       state.objects.announced.set(t.label, now);
-      say(ANNOUNCE[state.opts.lang](t.label), "calm", { force: true });
+      say(ANNOUNCE[state.opts.lang](nameOf(t)), "calm", { force: true });
       return;
     }
+  }
+}
+
+// "What's in view?": a vision model lists everything, including things the detector doesn't know
+async function scanScene() {
+  if (!state.running) return toast("Start the camera first.");
+  if (!state.status?.vision) return toast("Connect Groq, Gemini or Claude in ⚙ Settings to scan with AI.", 4500);
+  const btn = $("scan-btn");
+  btn.disabled = true;
+  btn.textContent = "Looking…";
+  const shot = snapshot($("video"));
+  try {
+    const res = await fetch("/api/identify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ image: shot.base64, scene: true }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    $("scan-list").replaceChildren(
+      ...data.objects.map((name) => {
+        const b = el("button", { type: "button", textContent: name });
+        b.onclick = () => describe({ id: null, label: name, score: 1, frame: shot });
+        return b;
+      }),
+    );
+    if (!data.objects.length) toast("Nothing clear enough to name. Try more light.");
+  } catch (err) {
+    toast(`Scan failed: ${err.message}`, 4000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✨ What's in view?";
   }
 }
 
@@ -432,7 +628,8 @@ async function describe(track) {
   const req = ++state.objects.describing;
   state.objects.selected = track.id;
   setTab("objects");
-  const { base64, preview } = cropObject(video, track.box);
+  const { base64, preview } = track.frame || cropObject(video, track.box);
+  const label = nameOf(track);
   const card = $("obj-card");
   card.hidden = false;
   card.classList.add("loading");
@@ -440,8 +637,8 @@ async function describe(track) {
   void card.offsetWidth;
   card.style.animation = "";
   $("obj-img").src = preview;
-  $("obj-label").textContent = `Detected · ${track.label} · ${Math.round(track.score * 100)}%`;
-  $("obj-name").textContent = track.label;
+  $("obj-label").textContent = track.frame ? "Found by AI scan" : `Detected · ${track.label} · ${Math.round(track.score * 100)}%`;
+  $("obj-name").textContent = label;
   $("obj-text").replaceChildren(el("span", { className: "shimmer" }), el("span", { className: "shimmer", style: "width:80%" }));
   $("obj-facts").replaceChildren();
   $("obj-meta").textContent = "";
@@ -450,7 +647,7 @@ async function describe(track) {
     const res = await fetch("/api/describe", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ label: track.label, score: track.score, image: base64, lang: state.opts.lang }),
+      body: JSON.stringify({ label, score: track.score, image: base64, lang: state.opts.lang }),
     });
     const data = await res.json();
     if (req !== state.objects.describing) return; // user tapped something else meanwhile
@@ -484,21 +681,7 @@ function recognise(vec, handCount, now) {
   renderPrediction(pred, handCount);
 
   // hands down: release the lock and, after a pause, finish the sentence
-  if (!handCount) {
-    state.locked = null;
-    if (!state.signs.length) face.resetSentence(); // idle: start the next sentence's face summary fresh
-    state.handsGoneAt ??= now;
-    const waited = now - state.handsGoneAt;
-    const canAuto = state.opts.auto && state.tab !== "practice" && state.signs.length && !state.translating;
-    $("hud-pause").hidden = !canAuto;
-    if (canAuto) {
-      $("pause-ring").style.strokeDashoffset = String(94.25 * (1 - Math.min(waited / state.opts.pause, 1)));
-      if (waited >= state.opts.pause) finishSentence();
-    }
-    return;
-  }
-  state.handsGoneAt = null;
-  $("hud-pause").hidden = true;
+  if (!handsPresence(handCount, now)) return;
 
   const counts = new Map();
   for (const l of state.preds) if (l) counts.set(l, (counts.get(l) || 0) + 1);
@@ -513,14 +696,14 @@ function recognise(vec, handCount, now) {
   }
 }
 
-function commitSign(gloss) {
+function commitSign(gloss, alts = null) {
   const label = $("pred-label");
   label.classList.remove("pop");
   void label.offsetWidth;
   label.classList.add("pop");
   if (state.tab === "practice") return practiceCheck(gloss);
   if (state.tab === "train") return;
-  state.signs.push({ gloss, markers: face.recentMarkers() });
+  state.signs.push({ gloss, markers: face.recentMarkers(), alts });
   renderSigns();
 }
 
@@ -557,13 +740,22 @@ function renderFace(fs) {
 }
 
 function renderSigns() {
-  $("signs").replaceChildren(
-    ...state.signs.map((s) => {
-      const chip = el("span", { className: "sign", textContent: s.gloss });
-      if (s.markers.length) chip.append(el("small", { textContent: s.markers.map((m) => MARKER_LABEL[m].split(" · ")[1]).join(", ") }));
-      return chip;
-    }),
-  );
+  const chips = state.signs.map((s) => {
+    const chip = el("span", { className: `sign${s.alts?.length > 1 ? " alt" : ""}${s.spelled ? " spelled" : ""}`, textContent: s.gloss });
+    if (s.markers.length) chip.append(el("small", { textContent: s.markers.map((m) => MARKER_LABEL[m].split(" · ")[1]).join(", ") }));
+    if (s.alts?.length > 1) {
+      // tap to swap in the model's next guess
+      chip.title = `Tap to change: ${s.alts.join(", ")}`;
+      chip.onclick = () => {
+        s.alts.push(s.alts.shift());
+        s.gloss = s.alts[0];
+        renderSigns();
+      };
+    }
+    return chip;
+  });
+  if (state.letters.spelling) chips.push(el("span", { className: "sign spelling", textContent: `${state.letters.spelling.split("").join("·")}…` }));
+  $("signs").replaceChildren(...chips);
 }
 
 // ---------- translation ----------
@@ -758,7 +950,183 @@ function renderSignList() {
   );
 }
 
-// ---------- practice ----------
+// ---------- learn ----------
+
+const BONES = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]];
+const FINGER_COLOR = ["#ff4fd8", "#5cf2ff", "#8b5cf6", "#2ee6a6", "#ffcf4a"];
+
+// Draw a target handshape (normalized landmarks) mirrored, so it matches what you see on camera.
+function drawHand(canvas, pts) {
+  const g = canvas.getContext("2d");
+  const dpr = devicePixelRatio || 1;
+  const size = canvas.clientWidth || 160;
+  if (canvas.width !== size * dpr) {
+    canvas.width = size * dpr;
+    canvas.height = size * dpr;
+  }
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, size, size);
+  if (!pts) return;
+  const xs = pts.map((p) => -p[0]);
+  const ys = pts.map((p) => p[1]);
+  const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const scale = (size * 0.62) / Math.max(maxX - minX, maxY - minY, 1e-6);
+  const ox = size / 2 - ((minX + maxX) / 2) * scale;
+  const oy = size / 2 - ((minY + maxY) / 2) * scale - size * 0.06;
+  const P = (i) => [xs[i] * scale + ox, ys[i] * scale + oy];
+  g.lineCap = "round";
+  for (const [a, b] of BONES) {
+    const finger = b <= 4 ? 0 : b <= 8 ? 1 : b <= 12 ? 2 : b <= 16 ? 3 : 4;
+    g.strokeStyle = FINGER_COLOR[finger];
+    g.shadowColor = FINGER_COLOR[finger];
+    g.shadowBlur = 10;
+    g.lineWidth = 4;
+    g.beginPath();
+    g.moveTo(...P(a));
+    g.lineTo(...P(b));
+    g.stroke();
+  }
+  g.shadowBlur = 0;
+  g.fillStyle = "#fff";
+  for (let i = 0; i < 21; i++) {
+    g.beginPath();
+    g.arc(...P(i), i % 4 === 0 ? 3.4 : 2.4, 0, Math.PI * 2);
+    g.fill();
+  }
+}
+
+function loadMastered() {
+  try {
+    state.learn.mastered = new Set(JSON.parse(localStorage.getItem("signbridge.mastered") || "[]"));
+  } catch {}
+}
+function saveMastered() {
+  try {
+    localStorage.setItem("signbridge.mastered", JSON.stringify([...state.learn.mastered]));
+  } catch {}
+}
+
+function learnNext() {
+  const L = state.learn;
+  L.hold = 0;
+  L.active = true;
+  $("practice-feedback").textContent = "";
+  $("practice-feedback").className = "practice-feedback";
+  $("learn-meter").style.width = "0";
+  $("practice-target").classList.remove("win");
+  const ring = document.querySelector(".practice-ring");
+  if (L.lesson === "custom") {
+    ring.classList.remove("has-hand");
+    drawHand($("learn-hand"), null);
+    $("learn-tip").textContent = "Sign the word shown, using the signs you recorded in Train.";
+    $("learn-watch").hidden = true;
+    return practiceNext();
+  }
+  let pool;
+  if (L.lesson === "letters") pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+  else pool = state.words.rec?.labels || [];
+  if (!pool.length) {
+    $("practice-target").textContent = "…";
+    $("learn-tip").textContent = "Loading the model…";
+    return;
+  }
+  // new items first, in order for the alphabet; then review at random
+  const key = (x) => `${L.lesson}:${x}`;
+  const fresh = pool.filter((x) => !L.mastered.has(key(x)));
+  const choices = fresh.length ? (L.lesson === "letters" ? fresh.slice(0, 1) : fresh) : pool;
+  let next = choices[Math.floor(Math.random() * choices.length)];
+  if (choices.length > 1) while (next === L.target) next = choices[Math.floor(Math.random() * choices.length)];
+  L.target = next;
+  const t = $("practice-target");
+  if (L.lesson === "letters") {
+    t.textContent = next;
+    ring.classList.add("has-hand");
+    drawHand($("learn-hand"), state.letters.rec?.template(next));
+    $("learn-tip").textContent = LETTER_TIPS[next];
+    $("learn-watch").hidden = true;
+  } else {
+    t.textContent = glossOf(next);
+    ring.classList.remove("has-hand");
+    drawHand($("learn-hand"), null);
+    $("learn-tip").textContent = "Watch how it's signed, then sign it and lower your hands.";
+    $("learn-watch").href = videoFor(next);
+    $("learn-watch").hidden = false;
+  }
+  const done = pool.filter((x) => L.mastered.has(key(x))).length;
+  $("practice-score").textContent = `${done}/${pool.length}`;
+}
+
+function learnFrame(hands, faceRes, now, aspect) {
+  const L = state.learn;
+  if (L.lesson === "words") {
+    state.words.stream?.push(WordRecognizer.frame(hands, faceRes), now);
+    return;
+  }
+  const rec = state.letters.rec;
+  const lm = hands.landmarks?.[0];
+  if (!rec || !L.target || !L.active) return;
+  if (!lm) {
+    L.hold = Math.max(0, L.hold - 1);
+    $("learn-meter").style.width = "0";
+    return;
+  }
+  const all = rec.predict(lm, aspect, 26);
+  const p = all.find((x) => x.letter === L.target)?.p || 0;
+  $("learn-meter").style.width = `${Math.round(p * 100)}%`;
+  L.hold = p >= 0.6 ? L.hold + 1 : Math.max(0, L.hold - 2);
+  if (L.hold >= 10) return learnSuccess();
+  if (now - L.hintAt > 450) {
+    L.hintAt = now;
+    const fb = $("practice-feedback");
+    fb.className = "practice-feedback";
+    fb.textContent = p >= 0.35 ? "Almost there. Hold it steady." : rec.hint(L.target, lm, aspect) || `That looks more like ${all[0].letter}`;
+  }
+}
+
+function learnWordGuess(top, final) {
+  const L = state.learn;
+  if (!L.active) return;
+  const hit = top.find((t) => t.word === L.target);
+  $("learn-meter").style.width = `${Math.round((hit?.p || 0) * 100)}%`;
+  if (!final) return;
+  const fb = $("practice-feedback");
+  const rank = top.findIndex((t) => t.word === L.target);
+  if (rank === 0) return learnSuccess();
+  fb.className = "practice-feedback";
+  fb.textContent = rank > 0 ? `Close! It was guess #${rank + 1}. Try once more.` : `That looked like ${glossOf(top[0].word)}. Watch the video and try again.`;
+  state.practice.streak = 0;
+  $("practice-streak").textContent = 0;
+}
+
+function learnWordCommit(best) {
+  if (best.word === state.learn.target) learnSuccess();
+}
+
+function learnSuccess() {
+  const L = state.learn;
+  if (!L.active) return;
+  L.active = false;
+  L.mastered.add(`${L.lesson}:${L.target}`);
+  saveMastered();
+  state.practice.streak++;
+  $("practice-streak").textContent = state.practice.streak;
+  const fb = $("practice-feedback");
+  fb.textContent = state.practice.streak >= 3 ? `🔥 ${state.practice.streak} in a row!` : "✓ Perfect!";
+  fb.className = "practice-feedback good";
+  $("practice-target").classList.add("win");
+  $("learn-meter").style.width = "100%";
+  setTimeout(learnNext, 1300);
+}
+
+function setLesson(lesson) {
+  state.learn.lesson = lesson;
+  state.learn.target = null;
+  selectIn($("learn-seg"), "data-lesson", lesson);
+  state.words.stream?.reset();
+  learnNext();
+}
+
+// ---------- practice (custom signs) ----------
 
 function practiceNext() {
   const labels = classifier.labels().map(([l]) => l).filter((l) => !l.startsWith("_"));
@@ -855,9 +1223,11 @@ function renderProviders(status) {
 }
 
 function renderVoices() {
+  const have = state.voicesAvailable || {};
   $("voices").replaceChildren(
     ...VOICES.map((v) => {
-      const b = el("button", { type: "button", className: "voice" }, el("b", { textContent: v.name }), el("span", { textContent: v.note }));
+      const note = `${v.provider === "sarvam" ? "Indian · Sarvam" : "ElevenLabs"}${have[v.provider] ? "" : " · needs key"}`;
+      const b = el("button", { type: "button", className: "voice" }, el("b", { textContent: v.name }), el("span", { textContent: note }));
       b.setAttribute("aria-pressed", String(state.opts.voice === v.id));
       b.onclick = () => {
         state.opts.voice = v.id;
@@ -873,10 +1243,15 @@ function renderVoices() {
 // ---------- wiring ----------
 
 function setTab(tab) {
+  const leaving = state.tab;
   state.tab = tab;
   selectIn(document.querySelector(".dock-tabs"), "data-tab", tab);
   document.querySelectorAll(".tab-panel").forEach((p) => (p.hidden = p.dataset.panel !== tab));
-  if (tab === "practice" && !state.practice.target) practiceNext();
+  if (tab === "practice") {
+    positionPill($("learn-seg"));
+    if (!state.learn.target) learnNext();
+  }
+  if (leaving === "practice" || tab === "practice") state.words.stream?.reset();
 }
 
 function bind() {
@@ -907,6 +1282,7 @@ function bind() {
   };
   $("translate-now").onclick = () => finishSentence();
   $("setup-nudge").onclick = () => setTab("settings");
+  $("scan-btn").onclick = scanScene;
   $("replay").onclick = () => state.lastResult && say(state.lastResult.speech, state.lastResult.tone, { force: true, lang: state.lastResult.lang });
 
   $("manual-form").onsubmit = (e) => {
@@ -1013,12 +1389,14 @@ function bind() {
   };
 
   // practice
-  $("practice-start").onclick = practiceNext;
+  $("practice-start").onclick = learnNext;
   $("practice-skip").onclick = () => {
     state.practice.streak = 0;
     $("practice-streak").textContent = 0;
-    practiceNext();
+    learnNext();
   };
+  document.querySelectorAll("#learn-seg [data-lesson]").forEach((b) => (b.onclick = () => setLesson(b.dataset.lesson)));
+  document.querySelectorAll("#source-seg [data-source]").forEach((b) => (b.onclick = () => setSource(b.dataset.source)));
 
   // keyboard shortcuts (ignored while typing or before the app opens)
   document.addEventListener("keydown", (e) => {
@@ -1039,6 +1417,8 @@ function bind() {
 let listener;
 bind();
 loadOpts();
+loadMastered();
+selectIn($("source-seg"), "data-source", state.opts.source);
 selectIn($("lang-seg"), "data-lang", state.opts.lang);
 renderSignList();
 renderSigns();
@@ -1046,3 +1426,8 @@ renderVoices();
 initHero();
 refreshStatus();
 setInterval(refreshStatus, 15000);
+
+// Test hook for scripted end-to-end checks (drives the real frame pipeline without a camera). Only with ?debug.
+if (new URLSearchParams(location.search).has("debug")) {
+  window.SIGNBRIDGE = { state, signFrame, setSource, setTab, setLesson, loadSignModels, createTrackers, Overlay, finishSentence };
+}

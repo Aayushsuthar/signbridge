@@ -4,6 +4,8 @@ import { translateWithRules } from "../lib/rules.mjs";
 import { buildTranslatePrompt, buildDescribePrompt, TRANSLATE_SCHEMA, TONES } from "../lib/prompt.mjs";
 import { markChanges } from "../public/js/diff.js";
 import { FaceAnalyzer } from "../public/js/face.js";
+import { readFileSync } from "node:fs";
+import { features, standardize, mlpForward, FEATURES } from "../public/js/fingerspell-features.js";
 
 const sign = (gloss, markers = []) => ({ gloss, markers });
 let passed = 0;
@@ -94,6 +96,25 @@ test("face: still head is not a shake, smile reads as happy", () => {
   for (let i = 0; i < 30; i++) s = f.update({ faceBlendshapes: [{ categories: cats }], facialTransformationMatrixes: [{ data: m }] }, i * 33);
   assert.equal(s.emotion, "happy");
   assert.ok(!s.markers.includes("head-shake"));
+});
+
+test("fingerspelling model: loads, right shape, recognises its own letter templates", () => {
+  const model = JSON.parse(readFileSync(new URL("../public/models/fingerspelling.json", import.meta.url)));
+  assert.equal(model.mean.length, FEATURES);
+  assert.equal(model.labels.length, 26);
+  let ok = 0;
+  for (const letter of model.labels) {
+    const probs = mlpForward(model, standardize(model, features(model.templates[letter])));
+    const top3 = probs.map((p, i) => [p, model.labels[i]]).sort((a, b) => b[0] - a[0]).slice(0, 3).map((x) => x[1]);
+    if (top3.includes(letter)) ok++;
+  }
+  assert.ok(ok >= 24, `only ${ok}/26 templates recognised`);
+});
+
+test("word model files are present with 250 labels", () => {
+  const labels = JSON.parse(readFileSync(new URL("../public/models/asl-signs-labels.json", import.meta.url)));
+  assert.equal(Object.keys(labels).length, 250);
+  assert.ok(readFileSync(new URL("../public/models/asl-signs.tflite", import.meta.url)).length > 1e6);
 });
 
 console.log(`\n${passed} checks passed`);

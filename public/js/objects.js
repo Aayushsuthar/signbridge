@@ -10,8 +10,8 @@ export async function createObjectDetector() {
   const opts = (delegate) => ({
     baseOptions: { modelAssetPath: MODEL, delegate },
     runningMode: "VIDEO",
-    scoreThreshold: 0.42,
-    maxResults: 8,
+    scoreThreshold: 0.3, // high recall here; the tracker decides what's solid enough to show
+    maxResults: 10,
   });
   try {
     return await ObjectDetector.createFromOptions(fileset, opts("GPU"));
@@ -29,6 +29,9 @@ const iou = (a, b) => {
   return inter / (a.w * a.h + b.w * b.h - inter || 1);
 };
 
+// Tracks objects across frames. Each track keeps a score-weighted vote over every label the detector
+// has given it, so a mug doesn't flicker between "cup" and "vase"; a track is shown only once it has
+// been seen a few times with a solid average score.
 export class ObjectTracker {
   constructor() {
     this.tracks = [];
@@ -46,27 +49,32 @@ export class ObjectTracker {
     const used = new Set();
     for (const tr of this.tracks) {
       let best = null;
-      let bestIou = 0.25;
+      let bestScore = 0;
       dets.forEach((d, i) => {
-        if (used.has(i) || d.label !== tr.label) return;
+        if (used.has(i)) return;
         const v = iou(tr.box, d.box);
-        if (v > bestIou) [best, bestIou] = [i, v];
+        // same place is enough when the overlap is strong; weaker overlaps must agree on the label
+        const score = d.label === tr.label ? v : v > 0.55 ? v * 0.8 : 0;
+        if (score > 0.25 && score > bestScore) [best, bestScore] = [i, score];
       });
       if (best !== null) {
         used.add(best);
         const d = dets[best];
         for (const k of ["x", "y", "w", "h"]) tr.box[k] += (d.box[k] - tr.box[k]) * 0.45;
-        tr.score += (d.score - tr.score) * 0.3;
+        tr.votes[d.label] = (tr.votes[d.label] || 0) + d.score;
+        tr.scoreSum += d.score;
         tr.lastSeen = now;
         tr.hits++;
+        const [label, weight] = Object.entries(tr.votes).sort((a, b) => b[1] - a[1])[0];
+        tr.label = label;
+        tr.score = weight / tr.hits; // average confidence for the winning label
       }
     }
     dets.forEach((d, i) => {
-      if (!used.has(i)) this.tracks.push({ id: this.nextId++, ...d, box: { ...d.box }, born: now, lastSeen: now, hits: 1 });
+      if (!used.has(i)) this.tracks.push({ id: this.nextId++, ...d, box: { ...d.box }, votes: { [d.label]: d.score }, scoreSum: d.score, born: now, lastSeen: now, hits: 1 });
     });
-    this.tracks = this.tracks.filter((t) => now - t.lastSeen < 600);
-    // only show tracks confirmed over a few frames
-    return this.tracks.filter((t) => t.hits >= 3);
+    this.tracks = this.tracks.filter((t) => now - t.lastSeen < 700);
+    return this.tracks.filter((t) => t.hits >= 4 && t.scoreSum / t.hits >= 0.45);
   }
 
   clear() {
@@ -83,6 +91,16 @@ export function boxToStage(box, video, stageRect) {
   const oy = (stageRect.height - vh * scale) / 2;
   const left = stageRect.width - (ox + (box.x + box.w) * scale); // mirrored
   return { left, top: oy + box.y * scale, width: box.w * scale, height: box.h * scale };
+}
+
+// JPEG of the whole (unmirrored) frame, max 768 px, for "what's in view?"
+export function snapshot(video) {
+  const s = Math.min(1, 768 / Math.max(video.videoWidth, video.videoHeight));
+  const c = document.createElement("canvas");
+  c.width = Math.round(video.videoWidth * s);
+  c.height = Math.round(video.videoHeight * s);
+  c.getContext("2d").drawImage(video, 0, 0, c.width, c.height);
+  return { base64: c.toDataURL("image/jpeg", 0.85).split(",")[1], preview: c.toDataURL("image/jpeg", 0.6) };
 }
 
 // JPEG crop of the object (with some context), max 512 px, base64 without the data: prefix.

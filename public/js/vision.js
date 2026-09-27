@@ -12,33 +12,65 @@ const HAND_MODEL =
 const FACE_MODEL =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 
+const HAND_OPTS = { runningMode: "VIDEO", numHands: 2, minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5 };
+const FACE_OPTS = { runningMode: "VIDEO", numFaces: 1, outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true };
+const EMPTY_HANDS = { landmarks: [], worldLandmarks: [], handedness: [], handednesses: [] };
+const EMPTY_FACE = { faceLandmarks: [], faceBlendshapes: [], facialTransformationMatrixes: [] };
+
+// A MediaPipe graph that hits an error (e.g. a zero-sized frame while a video source switches) stays
+// broken for every later call. This wrapper skips empty frames and rebuilds the task after an error,
+// so one bad frame costs one frame, not the whole session.
+function resilient(create, empty) {
+  let task = null;
+  let rebuilding = null;
+  let lastTs = -1;
+  const wrapper = {
+    errors: 0,
+    ready: () => Boolean(task),
+    async init() {
+      task = await create();
+      return wrapper;
+    },
+    detectForVideo(video, ts) {
+      if (!task || rebuilding || !video.videoWidth || !video.videoHeight || ts <= lastTs) return empty;
+      lastTs = ts;
+      try {
+        return task.detectForVideo(video, ts);
+      } catch (err) {
+        wrapper.errors++;
+        console.warn("MediaPipe error, rebuilding tracker:", String(err).slice(0, 160));
+        const old = task;
+        task = null;
+        rebuilding = create()
+          .then((t) => (task = t))
+          .catch((e) => console.error("tracker rebuild failed", e))
+          .finally(() => {
+            rebuilding = null;
+            lastTs = -1;
+            try {
+              old.close();
+            } catch {}
+          });
+        return empty;
+      }
+    },
+  };
+  return wrapper;
+}
+
 export async function createTrackers() {
   const fileset = await FilesetResolver.forVisionTasks(WASM);
-  const make = (delegate) =>
-    Promise.all([
-      HandLandmarker.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: HAND_MODEL, delegate },
-        runningMode: "VIDEO",
-        numHands: 2,
-        minHandDetectionConfidence: 0.5,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-      }),
-      FaceLandmarker.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: FACE_MODEL, delegate },
-        runningMode: "VIDEO",
-        numFaces: 1,
-        outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: true,
-      }),
-    ]);
+  const make = async (delegate) => {
+    const hands = resilient(() => HandLandmarker.createFromOptions(fileset, { baseOptions: { modelAssetPath: HAND_MODEL, delegate }, ...HAND_OPTS }), EMPTY_HANDS);
+    const face = resilient(() => FaceLandmarker.createFromOptions(fileset, { baseOptions: { modelAssetPath: FACE_MODEL, delegate }, ...FACE_OPTS }), EMPTY_FACE);
+    await Promise.all([hands.init(), face.init()]);
+    return { hands, face, delegate };
+  };
   try {
-    const [hands, face] = await make("GPU");
-    return { hands, face, delegate: "GPU" };
+    return await make("GPU");
   } catch (err) {
     console.warn("GPU delegate failed, falling back to CPU", err);
-    const [hands, face] = await make("CPU");
-    return { hands, face, delegate: "CPU" };
+    return make("CPU");
   }
 }
 

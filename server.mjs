@@ -15,6 +15,10 @@ import {
   DESCRIBE_SYSTEM,
   DESCRIBE_SCHEMA,
   buildDescribePrompt,
+  IDENTIFY_SYSTEM,
+  IDENTIFY_SCHEMA,
+  SCENE_SCHEMA,
+  buildIdentifyPrompt,
 } from "./lib/prompt.mjs";
 
 try {
@@ -241,6 +245,20 @@ async function describe({ label, score, image, lang: rawLang }) {
   };
 }
 
+// Short, precise names from a vision-capable model: one object crop, or a whole scene.
+async function identify({ image, label, scene }) {
+  const backend = await pickBackend();
+  const sees = backend !== "rules" && (backend !== "ollama" || OLLAMA_SEES);
+  if (!sees) throw Object.assign(new Error("Connect Groq, Gemini or Claude in Settings to identify objects with AI."), { status: 501 });
+  const img = typeof image === "string" ? image.replace(/^data:image\/\w+;base64,/, "") : "";
+  if (!img || img.length > 2_000_000) throw Object.assign(new Error("no image"), { status: 400 });
+  const started = Date.now();
+  const raw = await ask(backend, { system: IDENTIFY_SYSTEM, user: buildIdentifyPrompt({ label: scene ? null : label }), schema: scene ? SCENE_SCHEMA : IDENTIFY_SCHEMA, image: img });
+  const clean = (x) => String(x || "").trim().toLowerCase().replace(/[.!]+$/, "").slice(0, 60);
+  if (scene) return { objects: (raw.objects || []).map(clean).filter(Boolean).slice(0, 8), backend, ms: Date.now() - started };
+  return { name: clean(raw.name) || label, sure: raw.sure !== false, backend, ms: Date.now() - started };
+}
+
 // ---------- voice ----------
 
 // Settings used when the model doesn't take audio tags (eleven_multilingual_v2 etc).
@@ -277,8 +295,50 @@ async function elevenlabs({ text, model, voice, tone }) {
   return Buffer.from(await res.arrayBuffer());
 }
 
-async function speak({ text, tone, voice }) {
+// Sarvam Bulbul: native Indian voices (Hindi, Indian English and 9 more Indian languages).
+// Tone maps to pace and "temperature" (how expressive the delivery is).
+const SARVAM_TONE = {
+  neutral: [1.0, 0.6], calm: [0.94, 0.45], happy: [1.06, 0.85], excited: [1.14, 1.0],
+  sad: [0.88, 0.7], angry: [1.06, 0.9], surprised: [1.1, 0.95], questioning: [1.0, 0.7],
+};
+const SARVAM_SPEAKERS = new Set(["ritu", "priya", "neha", "pooja", "simran", "kavya", "ishita", "shreya", "roopa", "tanya", "shruti", "suhani", "kavitha", "rupali"]);
+const SARVAM_DEFAULT = process.env.SARVAM_SPEAKER || "priya";
+
+async function sarvam({ text, tone, speaker, lang }) {
+  const [pace, temperature] = SARVAM_TONE[tone] || SARVAM_TONE.neutral;
+  const res = await fetch("https://api.sarvam.ai/text-to-speech", {
+    method: "POST",
+    headers: { "api-subscription-key": process.env.SARVAM_API_KEY, "content-type": "application/json" },
+    signal: AbortSignal.timeout(30_000),
+    body: JSON.stringify({
+      text: stripTags(text),
+      language_code: lang === "hi" ? "hi-IN" : "en-IN", // Hinglish (Roman script) reads naturally with en-IN
+      speaker: SARVAM_SPEAKERS.has(speaker) ? speaker : SARVAM_DEFAULT,
+      model: "bulbul:v3",
+      pace,
+      temperature,
+      speech_sample_rate: 24000,
+      enable_preprocessing: true,
+    }),
+  });
+  if (!res.ok) throw Object.assign(new Error(`sarvam ${res.status}: ${(await res.text()).slice(0, 300)}`), { status: res.status });
+  const data = await res.json();
+  if (!data.audios?.[0]) throw new Error("sarvam returned no audio");
+  return { audio: Buffer.from(data.audios[0], "base64"), type: "audio/wav" };
+}
+
+// voice ids: "sarvam:<speaker>" or "eleven:<voice id>"; with no match, use whichever service has a key
+async function speak({ text, tone, voice = "", lang }) {
   const t = VOICE_BY_TONE[tone] ? tone : "neutral";
+  const [kind, id] = voice.includes(":") ? voice.split(":") : ["", voice];
+  const hasSarvam = Boolean(process.env.SARVAM_API_KEY);
+  const hasEleven = Boolean(process.env.ELEVENLABS_API_KEY);
+  const provider = kind === "sarvam" && hasSarvam ? "sarvam" : kind === "eleven" && hasEleven ? "eleven" : hasSarvam ? "sarvam" : "eleven";
+  if (provider === "sarvam") return sarvam({ text, tone: t, speaker: kind === "sarvam" ? id : SARVAM_DEFAULT, lang });
+  return { audio: await elevenlabsSpeak({ text, tone: t, voice: kind === "eleven" ? id : "" }), type: "audio/mpeg" };
+}
+
+async function elevenlabsSpeak({ text, tone: t, voice }) {
   const v = /^[A-Za-z0-9]{16,32}$/.test(voice || "") ? voice : ELEVEN_VOICE;
   try {
     return await elevenlabs({ text, model: ELEVEN_MODEL, voice: v, tone: t });
@@ -294,7 +354,7 @@ async function speak({ text, tone, voice }) {
 
 // ---------- in-app key setup ----------
 
-const CONFIG_KEYS = { groq: "GROQ_API_KEY", gemini: "GEMINI_API_KEY", claude: "ANTHROPIC_API_KEY", elevenlabs: "ELEVENLABS_API_KEY" };
+const CONFIG_KEYS = { groq: "GROQ_API_KEY", gemini: "GEMINI_API_KEY", claude: "ANTHROPIC_API_KEY", elevenlabs: "ELEVENLABS_API_KEY", sarvam: "SARVAM_API_KEY" };
 
 // Cheap authenticated calls that confirm a key works before it's saved.
 async function verifyKey(provider, key) {
@@ -303,7 +363,7 @@ async function verifyKey(provider, key) {
     gemini: () => fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { headers: { "x-goog-api-key": key } }),
     claude: () => fetch("https://api.anthropic.com/v1/models?limit=1", { headers: { "x-api-key": key, "anthropic-version": "2023-06-01" } }),
   };
-  if (!checks[provider]) return true; // ElevenLabs keys can be scoped so tightly that no read endpoint works; trust it
+  if (!checks[provider]) return true; // voice keys (ElevenLabs can be tightly scoped, Sarvam has no free read endpoint): checked on first use
   const res = await checks[provider]().catch(() => null);
   if (!res) throw Object.assign(new Error("Couldn't reach the provider. Check your internet connection."), { status: 502 });
   if (res.status === 401 || res.status === 403 || res.status === 400) throw Object.assign(new Error("That key was rejected. Copy it again and paste the whole key."), { status: 400 });
@@ -377,8 +437,9 @@ const server = http.createServer(async (req, res) => {
         ollama: { ...ollama, model: OLLAMA_MODEL },
         keys: Object.fromEntries(Object.entries(CONFIG_KEYS).map(([k, v]) => [k, Boolean(process.env[v])])),
         claude: Boolean(process.env.ANTHROPIC_API_KEY),
-        voice: process.env.ELEVENLABS_API_KEY ? "elevenlabs" : "browser",
-        voiceModel: process.env.ELEVENLABS_API_KEY ? ELEVEN_MODEL : null,
+        voice: process.env.SARVAM_API_KEY ? "sarvam" : process.env.ELEVENLABS_API_KEY ? "elevenlabs" : "browser",
+        voices: { sarvam: Boolean(process.env.SARVAM_API_KEY), elevenlabs: Boolean(process.env.ELEVENLABS_API_KEY) },
+        voiceModel: process.env.SARVAM_API_KEY ? "bulbul:v3" : process.env.ELEVENLABS_API_KEY ? ELEVEN_MODEL : null,
         defaultVoice: ELEVEN_VOICE,
       });
     }
@@ -386,6 +447,10 @@ const server = http.createServer(async (req, res) => {
       const payload = await readJson(req);
       if (!Array.isArray(payload.signs) || payload.signs.length === 0) return sendJson(res, 400, { error: "no signs" });
       return sendJson(res, 200, await translate(payload));
+    }
+    if (req.method === "POST" && req.url === "/api/identify") {
+      const payload = await readJson(req, 3 * 1024 * 1024);
+      return sendJson(res, 200, await identify(payload));
     }
     if (req.method === "POST" && req.url === "/api/describe") {
       const payload = await readJson(req, 3 * 1024 * 1024);
@@ -405,11 +470,11 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, llm: await pickBackend() });
     }
     if (req.method === "POST" && req.url === "/api/speak") {
-      if (!process.env.ELEVENLABS_API_KEY) return sendJson(res, 501, { error: "no ElevenLabs key; use browser voice" });
-      const { text, tone, voice } = await readJson(req);
+      if (!process.env.ELEVENLABS_API_KEY && !process.env.SARVAM_API_KEY) return sendJson(res, 501, { error: "no voice key; use browser voice" });
+      const { text, tone, voice, lang } = await readJson(req);
       if (!text) return sendJson(res, 400, { error: "no text" });
-      const audio = await speak({ text: String(text).slice(0, 1200), tone, voice });
-      res.writeHead(200, { "content-type": "audio/mpeg" });
+      const { audio, type } = await speak({ text: String(text).slice(0, 1200), tone, voice: String(voice || ""), lang });
+      res.writeHead(200, { "content-type": type });
       return res.end(audio);
     }
     if (req.method === "GET") return serveStatic(req, res);
