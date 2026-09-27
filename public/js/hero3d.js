@@ -159,7 +159,8 @@ export function startHero3D(container) {
 
   function frame(now) {
     if (!running) return;
-    const t = reduced ? 1.5 : (now - t0) / 1000;
+    // rAF's timestamp can be a little earlier than t0 on the first frame; never go negative
+    const t = reduced ? 1.5 : Math.max(0, (now - t0) / 1000);
 
     // pose morph
     const cycle = HOLD + MORPH;
