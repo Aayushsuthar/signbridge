@@ -5,6 +5,7 @@ import { buildTranslatePrompt, buildDescribePrompt, TRANSLATE_SCHEMA, TONES } fr
 import { markChanges } from "../public/js/diff.js";
 import { FaceAnalyzer } from "../public/js/face.js";
 import { readFileSync } from "node:fs";
+import { englishToGloss } from "../lib/to-gloss.mjs";
 import { features, standardize, mlpForward, FEATURES } from "../public/js/fingerspell-features.js";
 
 const sign = (gloss, markers = []) => ({ gloss, markers });
@@ -115,6 +116,21 @@ test("word model files are present with 250 labels", () => {
   const labels = JSON.parse(readFileSync(new URL("../public/models/asl-signs-labels.json", import.meta.url)));
   assert.equal(Object.keys(labels).length, 250);
   assert.ok(readFileSync(new URL("../public/models/asl-signs.tflite", import.meta.url)).length > 1e6);
+});
+
+test("English → ASL gloss: time first, wh last, names fingerspelled", () => {
+  const g = (t) => englishToGloss(t).map((x) => (x.video ? x.word : `fs:${x.word}`)).join(" ");
+  assert.equal(g("I went to the store yesterday."), "yesterday me go store");
+  assert.equal(g("What is your name?"), "your name what");
+  assert.equal(g("My name is Aayush"), "my name fs:aayush");
+  assert.equal(g("Thank you!"), "thank you");
+});
+
+test("object knowledge base: every entry complete, names unique", () => {
+  const kb = JSON.parse(readFileSync(new URL("../public/models/objects-kb.json", import.meta.url)));
+  assert.ok(kb.length >= 150);
+  assert.equal(new Set(kb.map((o) => o.name)).size, kb.length);
+  for (const o of kb) assert.ok(o.name && o.hi && o.cat && o.use, `incomplete: ${o.name}`);
 });
 
 console.log(`\n${passed} checks passed`);

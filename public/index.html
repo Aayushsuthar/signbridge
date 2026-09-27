@@ -130,6 +130,13 @@
               <span>Hands down to translate</span>
             </div>
 
+            <div class="sign-player glass" id="sign-player" hidden>
+              <video id="sp-video" muted playsinline></video>
+              <canvas id="sp-hand" hidden></canvas>
+              <div class="sp-caption" id="sp-caption"></div>
+              <button class="icon-btn sp-close" id="sp-close" title="Stop">✕</button>
+            </div>
+
             <div class="countdown" id="countdown" hidden></div>
             <div class="fps mono" id="fps"></div>
 
@@ -174,6 +181,10 @@
             </button>
             <ol class="transcript" id="transcript"><li class="empty">Train a few signs, then start signing. Replies you capture with 🎙️ appear here too.</li></ol>
             <p class="result-notes" id="result-notes"></p>
+            <form class="type-signs to-sign" id="to-sign-form">
+              <input id="to-sign-input" placeholder="Type a reply to show in sign language" autocomplete="off" />
+              <button class="btn-liquid sm"><span>🤟 Sign it</span></button>
+            </form>
             <form class="type-signs" id="manual-form">
               <input id="manual-input" placeholder="Type signs, e.g. STORE ME GO YESTERDAY" autocomplete="off" />
               <button class="btn-liquid sm"><span>Go</span></button>
@@ -187,7 +198,7 @@
               <h2>Objects</h2>
               <span class="count" id="obj-count"></span>
             </div>
-            <p class="fine">Switch to 🔍 Objects mode and tap anything the camera sees. With an AI connected, steady objects get a precise ✨ name.</p>
+            <p class="fine">Switch to 🔍 Objects mode and tap any box, or anywhere on the camera, to identify it. Recognises 195 everyday things offline; with an AI connected, ✨ names get even more precise.</p>
             <div class="obj-list" id="obj-list"></div>
             <button class="btn-glass xs" id="scan-btn">✨ What's in view?</button>
             <div class="obj-list scan-list" id="scan-list"></div>
@@ -271,6 +282,7 @@
             <h2 class="spaced">Behaviour</h2>
             <label class="toggle"><input type="checkbox" id="opt-auto" checked /><span></span> Auto-translate when hands drop</label>
             <label class="toggle"><input type="checkbox" id="opt-speak" checked /><span></span> Speak translations</label>
+            <label class="toggle"><input type="checkbox" id="opt-signreply" checked /><span></span> Show spoken replies in sign language</label>
             <label class="toggle"><input type="checkbox" id="opt-announce" /><span></span> Announce new objects aloud</label>
             <label class="toggle"><input type="checkbox" id="opt-mesh" checked /><span></span> Show face mesh</label>
             <label class="slider">Pause before translating <span class="mono" id="opt-pause-val">1.6s</span>

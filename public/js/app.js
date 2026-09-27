@@ -7,6 +7,8 @@ import { markChanges } from "./diff.js";
 import { createObjectDetector, ObjectTracker, boxToStage, cropObject, snapshot } from "./objects.js";
 import { WordRecognizer, WordStream, glossOf, videoFor } from "./asl-words.js";
 import { FingerspellRecognizer, LETTER_TIPS } from "./fingerspell.js";
+import { Clip, ObjectClassifier } from "./clip.js";
+import { SignPlayer } from "./sign-player.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...children) => {
@@ -75,10 +77,11 @@ const state = {
   words: { rec: null, stream: null, loading: false, lastTop: null },
   letters: { rec: null, preds: [], locked: null, spelling: "" },
   learn: { lesson: "letters", target: null, hold: 0, hintAt: 0, mastered: new Set() },
-  objects: { visible: [], selected: null, announced: new Map(), lastPanel: 0, describing: 0, identifying: false, lastIdentify: 0 },
+  objects: { visible: [], selected: null, announced: new Map(), lastPanel: 0, describing: 0, identifying: false, lastIdentify: 0, clip: null, clf: null, kb: new Map(), brain: "idle", recognising: false, center: null, lastCenter: 0 },
+  player: null,
   speaking: false,
   status: null,
-  opts: { auto: true, speak: true, mesh: true, announce: false, pause: 1600, lang: "en", voice: VOICES[0].id, source: "words" },
+  opts: { auto: true, speak: true, mesh: true, announce: false, signReply: true, pause: 1600, lang: "en", voice: VOICES[0].id, source: "words" },
 };
 
 const bg = startBackground($("bg"));
@@ -108,7 +111,7 @@ function loadOpts() {
   try {
     Object.assign(state.opts, JSON.parse(localStorage.getItem("signbridge.opts") || "{}"));
   } catch {}
-  for (const [id, key] of [["opt-auto", "auto"], ["opt-speak", "speak"], ["opt-mesh", "mesh"], ["opt-announce", "announce"]]) $(id).checked = state.opts[key];
+  for (const [id, key] of [["opt-auto", "auto"], ["opt-speak", "speak"], ["opt-mesh", "mesh"], ["opt-announce", "announce"], ["opt-signreply", "signReply"]]) $(id).checked = state.opts[key];
   $("opt-pause").value = state.opts.pause;
   $("opt-pause-val").textContent = `${(state.opts.pause / 1000).toFixed(1)}s`;
   if (state.opts.voice && !state.opts.voice.includes(":")) state.opts.voice = `eleven:${state.opts.voice}`; // pre-0.4 setting
@@ -467,7 +470,7 @@ async function setMode(mode) {
       setPred("Loading…", true);
       try {
         state.objectDetector = await createObjectDetector();
-        toast("Object recognition ready. Tap anything to learn about it.");
+        loadObjectBrain();
       } catch (err) {
         console.error(err);
         toast(`Couldn't load the object model: ${err.message}`, 5000);
@@ -486,6 +489,91 @@ async function setMode(mode) {
 
 // ---------- objects ----------
 
+// CLIP + the classifier trained in scripts/train-objects.mjs + the offline knowledge base
+async function loadObjectBrain() {
+  const O = state.objects;
+  if (O.brain !== "idle") return;
+  O.brain = "loading";
+  toast("Loading the everyday-object model (first time downloads ~90–170 MB, then it's cached)…", 5000);
+  try {
+    const [clip, model, kb] = await Promise.all([
+      new Clip().initVision(),
+      fetch("/models/objects-clip.json").then((r) => r.json()),
+      fetch("/models/objects-kb.json").then((r) => r.json()),
+    ]);
+    O.clip = clip;
+    O.clf = new ObjectClassifier(model);
+    for (const o of kb) O.kb.set(o.id, o);
+    O.brain = "ready";
+    toast("Object recognition ready: 195 everyday things. Tap anything to learn about it.");
+  } catch (err) {
+    console.error("object model failed", err);
+    O.brain = "failed";
+    toast("The everyday-object model couldn't load; using the basic 80-object detector.", 5000);
+  }
+}
+
+async function classifyCanvas(canvas) {
+  const O = state.objects;
+  const emb = await O.clip.embedImage(canvas);
+  return O.clf.classify(emb, 3);
+}
+
+function cropCanvas(video, box) {
+  const x = Math.max(0, box.x), y = Math.max(0, box.y);
+  const w = Math.min(video.videoWidth - x, box.w), h = Math.min(video.videoHeight - y, box.h);
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w));
+  c.height = Math.max(1, Math.round(h));
+  c.getContext("2d").drawImage(video, x, y, w, h, 0, 0, c.width, c.height);
+  return c;
+}
+
+// Name steady detections with the trained model (one at a time), and say what's in the middle of
+// the view when the detector sees nothing it knows.
+async function recogniseObjects(video, now) {
+  const O = state.objects;
+  if (O.brain !== "ready" || O.recognising) return;
+  const t = O.visible.find((x) => x.hits >= 6 && (!x.clipAt || now - x.clipAt > 4000));
+  O.recognising = true;
+  try {
+    if (t) {
+      const pad = 0.1;
+      const top = await classifyCanvas(cropCanvas(video, { x: t.box.x - t.box.w * pad, y: t.box.y - t.box.h * pad, w: t.box.w * (1 + 2 * pad), h: t.box.h * (1 + 2 * pad) }));
+      t.clipAt = now;
+      t.clip = top[0].p >= 0.3 ? top[0] : null;
+    } else if (!O.visible.length && now - O.lastCenter > 1200) {
+      O.lastCenter = now;
+      const s = Math.min(video.videoWidth, video.videoHeight) * 0.7;
+      const top = await classifyCanvas(cropCanvas(video, { x: (video.videoWidth - s) / 2, y: (video.videoHeight - s) / 2, w: s, h: s }));
+      O.center = top[0].p >= 0.35 ? top[0] : null;
+    }
+  } catch (err) {
+    console.warn("object classification failed", err);
+  } finally {
+    O.recognising = false;
+  }
+}
+
+// Tap anywhere on the camera view in Objects mode: identify what's under the finger
+async function tapToIdentify(e) {
+  if (state.mode !== "objects" || e.target.closest(".obj, .hud, .sign-player, .caption-dock")) return;
+  const O = state.objects;
+  if (O.brain !== "ready") return toast(O.brain === "loading" ? "Still loading the object model…" : "Object model unavailable.");
+  const video = $("video");
+  const rect = $("stage").getBoundingClientRect();
+  const scale = Math.max(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const ox = (rect.width - video.videoWidth * scale) / 2;
+  const oy = (rect.height - video.videoHeight * scale) / 2;
+  // the stage is mirrored: flip x back into video pixels
+  const vx = (rect.width - (e.clientX - rect.left) - ox) / scale;
+  const vy = (e.clientY - rect.top - oy) / scale;
+  const s = Math.min(video.videoWidth, video.videoHeight) * 0.42;
+  const box = { x: vx - s / 2, y: vy - s / 2, w: s, h: s };
+  const top = await classifyCanvas(cropCanvas(video, box));
+  describe({ id: null, label: top[0].name, score: top[0].p, box, clip: top[0] });
+}
+
 function objectsFrame(video, now) {
   if (!state.objectDetector) return;
   if (state.frame % 2 === 0) {
@@ -493,10 +581,14 @@ function objectsFrame(video, now) {
     state.objects.visible = objTracker.update(res, now);
   }
   renderObjects(state.objects.visible);
+  recogniseObjects(video, now);
   autoIdentify(video, now);
   const n = state.objects.visible.length;
   const top = [...state.objects.visible].sort((a, b) => b.score - a.score)[0];
-  setPred(top ? nameOf(top) : "Looking…", !top, top ? `${n} object${n === 1 ? "" : "s"} · tap one` : "point the camera at something");
+  const center = state.objects.center;
+  if (top) setPred(nameOf(top), false, `${n} object${n === 1 ? "" : "s"} · tap one`);
+  else if (center) setPred(center.name, false, `looks like · ${Math.round(center.p * 100)}% · tap to learn more`);
+  else setPred("Looking…", true, "point the camera at something");
   $("pred-bar").style.width = top ? `${Math.round(top.score * 100)}%` : "0";
 
   if (now - state.objects.lastPanel > 300) {
@@ -506,7 +598,7 @@ function objectsFrame(video, now) {
   }
 }
 
-const nameOf = (t) => t.aiName || t.label;
+const nameOf = (t) => t.aiName || t.clip?.name || t.label;
 
 // Once an object has been steady for a moment, ask a vision model for its precise name
 // (one request at a time, a few seconds apart, once per tracked object).
@@ -637,8 +729,11 @@ async function describe(track) {
   void card.offsetWidth;
   card.style.animation = "";
   $("obj-img").src = preview;
-  $("obj-label").textContent = track.frame ? "Found by AI scan" : `Detected · ${track.label} · ${Math.round(track.score * 100)}%`;
+  $("obj-label").textContent = track.frame ? "Found by AI scan" : track.clip ? `Recognised · ${Math.round(track.clip.p * 100)}%` : `Detected · ${track.label} · ${Math.round(track.score * 100)}%`;
   $("obj-name").textContent = label;
+  // offline knowledge first: shows instantly, works without any key
+  const kb = track.clip ? state.objects.kb.get(track.clip.id) : [...state.objects.kb.values()].find((o) => o.name === label);
+  const kbFacts = kb ? [kb.tip, `हिन्दी: ${kb.hi}`, `Category: ${kb.cat}`].filter(Boolean) : [];
   $("obj-text").replaceChildren(el("span", { className: "shimmer" }), el("span", { className: "shimmer", style: "width:80%" }));
   $("obj-facts").replaceChildren();
   $("obj-meta").textContent = "";
@@ -654,11 +749,13 @@ async function describe(track) {
     if (!res.ok) throw new Error(data.error || res.statusText);
     card.classList.remove("loading");
     const lang = data.lang === "hi" ? "hi" : "en";
-    $("obj-name").textContent = data.name;
+    const offline = data.backend === "wikipedia";
+    $("obj-name").textContent = kb && offline ? `${kb.name} · ${kb.hi}` : data.name;
     $("obj-name").lang = lang;
-    $("obj-text").textContent = data.text;
+    $("obj-text").textContent = kb && offline ? `${kb.use} ${data.text}`.trim() : data.text;
     $("obj-text").lang = lang;
-    $("obj-facts").replaceChildren(...data.facts.map((f) => el("li", { textContent: f, lang })));
+    $("obj-facts").replaceChildren(...[...kbFacts, ...data.facts].slice(0, 5).map((f) => el("li", { textContent: f, lang })));
+    if (kb && offline) data.speech = `This is a ${kb.name}. ${kb.use} ${kb.tip}`;
     $("obj-meta").textContent = `${data.backend}${data.sawImage ? " · saw the photo" : ""} · ${(data.ms / 1000).toFixed(1)}s`;
     if (data.wiki?.url) {
       $("obj-wiki").href = data.wiki.url;
@@ -668,7 +765,12 @@ async function describe(track) {
     say(data.speech, data.tone, { lang: data.lang });
   } catch (err) {
     card.classList.remove("loading");
-    $("obj-text").textContent = `Couldn't describe it: ${err.message}`;
+    if (kb) {
+      $("obj-name").textContent = `${kb.name} · ${kb.hi}`;
+      $("obj-text").textContent = kb.use;
+      $("obj-facts").replaceChildren(...kbFacts.map((f) => el("li", { textContent: f })));
+      say(`This is a ${kb.name}. ${kb.use} ${kb.tip}`, "calm");
+    } else $("obj-text").textContent = `Couldn't describe it: ${err.message}`;
   }
 }
 
@@ -948,6 +1050,32 @@ function renderSignList() {
       return b;
     }),
   );
+}
+
+// ---------- replies in sign language ----------
+
+async function showInSign(text) {
+  if (!text?.trim()) return;
+  try {
+    if (!state.player) {
+      state.player = await new SignPlayer({
+        video: $("sp-video"),
+        canvas: $("sp-hand"),
+        caption: $("sp-caption"),
+        drawHand,
+        onState: (on) => ($("sign-player").hidden = !on),
+      }).init();
+    }
+    const res = await fetch("/api/to-sign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, lang: state.opts.lang }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    const gloss = data.signs.map((s) => (s.video ? s.word.toUpperCase() : `fs:${s.word.toUpperCase()}`)).join(" ");
+    const list = $("transcript");
+    list.lastElementChild?.append(el("span", { className: "who gloss", textContent: `🤟 ${gloss}` }));
+    await state.player.play(data.signs);
+  } catch (err) {
+    toast(`Couldn't show that in sign: ${err.message}`, 4000);
+  }
 }
 
 // ---------- learn ----------
@@ -1283,6 +1411,16 @@ function bind() {
   $("translate-now").onclick = () => finishSentence();
   $("setup-nudge").onclick = () => setTab("settings");
   $("scan-btn").onclick = scanScene;
+  $("stage").addEventListener("click", tapToIdentify);
+  $("sp-close").onclick = () => state.player?.stop();
+  $("to-sign-form").onsubmit = (e) => {
+    e.preventDefault();
+    const text = $("to-sign-input").value.trim();
+    if (!text) return;
+    addTranscript({ who: "speaker", text, lang: state.opts.lang });
+    showInSign(text);
+    $("to-sign-input").value = "";
+  };
   $("replay").onclick = () => state.lastResult && say(state.lastResult.speech, state.lastResult.tone, { force: true, lang: state.lastResult.lang });
 
   $("manual-form").onsubmit = (e) => {
@@ -1313,7 +1451,10 @@ function bind() {
   listener = createListener({
     onInterim: (t) => ($("caption").textContent = t),
     onFinal: (t) => {
-      if (t) addTranscript({ who: "speaker", text: t, lang: state.opts.lang });
+      if (t) {
+        addTranscript({ who: "speaker", text: t, lang: state.opts.lang });
+        if (state.opts.signReply) showInSign(t);
+      }
       $("caption").textContent = "";
     },
     onState: (on, err) => {
@@ -1334,7 +1475,7 @@ function bind() {
   };
 
   // settings
-  for (const [id, key] of [["opt-auto", "auto"], ["opt-speak", "speak"], ["opt-mesh", "mesh"], ["opt-announce", "announce"]]) {
+  for (const [id, key] of [["opt-auto", "auto"], ["opt-speak", "speak"], ["opt-mesh", "mesh"], ["opt-announce", "announce"], ["opt-signreply", "signReply"]]) {
     $(id).onchange = () => {
       state.opts[key] = $(id).checked;
       saveOpts();
@@ -1429,5 +1570,5 @@ setInterval(refreshStatus, 15000);
 
 // Test hook for scripted end-to-end checks (drives the real frame pipeline without a camera). Only with ?debug.
 if (new URLSearchParams(location.search).has("debug")) {
-  window.SIGNBRIDGE = { state, signFrame, setSource, setTab, setLesson, loadSignModels, createTrackers, Overlay, finishSentence };
+  window.SIGNBRIDGE = { state, signFrame, setSource, setTab, setLesson, loadSignModels, createTrackers, Overlay, finishSentence, loadObjectBrain, classifyCanvas, cropCanvas, describe, showInSign };
 }

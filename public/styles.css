@@ -393,6 +393,21 @@ body.objects .hud-label { text-transform: capitalize; }
 #scan-btn { margin-bottom: 4px; }
 .obj-tag b { font: 500 10.5px var(--mono); color: var(--cyan); margin-left: 5px; }
 
+/* sign-language playback (spoken/typed replies shown as ASL) */
+.sign-player {
+  position: absolute; right: 16px; top: 88px; z-index: 6; width: min(40%, 340px); aspect-ratio: 4 / 3;
+  border-radius: 18px; overflow: hidden; padding: 0; animation: objin 0.45s var(--spring);
+}
+.sign-player video, .sign-player canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.sign-player canvas { background: radial-gradient(circle at 50% 40%, #1a1f2e, #07080d); }
+.sp-caption {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); padding: 4px 12px; border-radius: 999px;
+  font: 700 14px var(--display); letter-spacing: 0.04em; background: rgba(8, 10, 14, 0.7); border: 1px solid var(--glass-line); white-space: nowrap;
+}
+.sp-close { position: absolute; top: 6px; right: 6px; background: rgba(8, 10, 14, 0.6); color: #fff; }
+.to-sign { margin-top: 12px; }
+@media (max-width: 560px) { .sign-player { width: 52%; top: 70px; } }
+
 /* stage actions */
 .stage-actions { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 999px; flex-shrink: 0; }
 .live-caption { flex: 1; min-width: 0; font: 600 15px var(--display); color: var(--mint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 6px; }
@@ -412,6 +427,7 @@ body.objects .hud-label { text-transform: capitalize; }
 .transcript li.speaker { align-self: flex-end; border-radius: 16px 16px 4px 16px; background: linear-gradient(140deg, rgba(92, 242, 255, 0.16), rgba(139, 92, 246, 0.16)); }
 .transcript li.empty { background: none; border: 0; padding: 4px 0; font-size: 13.5px; max-width: none; animation: none; }
 .transcript .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.transcript .gloss { margin: 6px 0 0; font-family: var(--mono); font-size: 10.5px; color: var(--cyan); letter-spacing: 0.02em; }
 @keyframes msgin { from { opacity: 0; transform: translateY(10px) scale(0.96); } }
 .result-notes { color: var(--muted); font-size: 12.5px; font-style: italic; margin: 10px 0 0; }
 .type-signs { display: flex; gap: 8px; margin-top: 14px; }

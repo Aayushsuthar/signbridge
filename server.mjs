@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { translateWithRules } from "./lib/rules.mjs";
 import { wikiSummary } from "./lib/wiki.mjs";
+import { englishToGloss, VOCAB, lemma } from "./lib/to-gloss.mjs";
 import {
   TONES,
   LANGS,
@@ -15,6 +16,9 @@ import {
   DESCRIBE_SYSTEM,
   DESCRIBE_SCHEMA,
   buildDescribePrompt,
+  TO_SIGN_SYSTEM,
+  TO_SIGN_SCHEMA,
+  buildToSignPrompt,
   IDENTIFY_SYSTEM,
   IDENTIFY_SCHEMA,
   SCENE_SCHEMA,
@@ -259,6 +263,31 @@ async function identify({ image, label, scene }) {
   return { name: clean(raw.name) || label, sure: raw.sure !== false, backend, ms: Date.now() - started };
 }
 
+// Spoken text → ASL sign sequence. LLM when available (handles Hindi/Hinglish), rules otherwise.
+const VOCAB_LIST = [...VOCAB].sort();
+async function toSign({ text, lang }) {
+  const started = Date.now();
+  const clean = String(text || "").slice(0, 400);
+  const backend = await pickBackend();
+  if (backend !== "rules") {
+    try {
+      const raw = await ask(backend, { system: TO_SIGN_SYSTEM, user: buildToSignPrompt(clean, VOCAB_LIST), schema: TO_SIGN_SCHEMA });
+      const signs = (raw.signs || []).slice(0, 40).map(({ word, fingerspell }) => {
+        const w = String(word || "").toLowerCase().trim();
+        const l = !fingerspell && lemma(w);
+        return l ? { word: l, video: true } : { word: w.replace(/[^a-z0-9 ]/g, ""), video: false };
+      }).filter((x) => x.word);
+      return { signs, backend, ms: Date.now() - started };
+    } catch (err) {
+      console.warn(`[to-sign] ${backend} failed, using rules:`, err.message);
+    }
+  }
+  if (lang === "hi" && /[\u0900-\u097F]/.test(clean)) {
+    throw Object.assign(new Error("Hindi → sign needs an AI. Add a free Groq or Gemini key in Settings."), { status: 501 });
+  }
+  return { signs: englishToGloss(clean), backend: "rules", ms: Date.now() - started };
+}
+
 // ---------- voice ----------
 
 // Settings used when the model doesn't take audio tags (eleven_multilingual_v2 etc).
@@ -447,6 +476,11 @@ const server = http.createServer(async (req, res) => {
       const payload = await readJson(req);
       if (!Array.isArray(payload.signs) || payload.signs.length === 0) return sendJson(res, 400, { error: "no signs" });
       return sendJson(res, 200, await translate(payload));
+    }
+    if (req.method === "POST" && req.url === "/api/to-sign") {
+      const payload = await readJson(req);
+      if (!payload.text) return sendJson(res, 400, { error: "no text" });
+      return sendJson(res, 200, await toSign(payload));
     }
     if (req.method === "POST" && req.url === "/api/identify") {
       const payload = await readJson(req, 3 * 1024 * 1024);

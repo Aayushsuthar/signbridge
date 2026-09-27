@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CLIP Embedding</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; padding: 24px 16px; background: #07080d; color: #e9ecf3; font: 14px/1.5 system-ui, sans-serif; }
+      main { max-width: 800px; margin: 0 auto; }
+      p, code { color: #8b93a7; }
+      pre { background: #12151e; border: 1px solid #242938; border-radius: 12px; padding: 12px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>CLIP embeddings for the object model</h1>
+      <p>Computes the inputs for <code>scripts/train-objects.mjs</code> with the app's own CLIP module: text embeddings for every object in <code>/models/objects-kb.json</code>, and image embeddings for the Caltech-256 photos mapped to those objects. Rows are posted to <code>?post=</code> as JSON lines.</p>
+      <p><code>?task=text</code> · <code>?task=images&amp;split=train&amp;per=40</code> · <code>?task=images&amp;split=test</code></p>
+      <pre id="out">starting…</pre>
+    </main>
+    <script type="module">
+      import { asyncBufferFromUrl, parquetMetadataAsync, parquetReadObjects } from "https://cdn.jsdelivr.net/npm/hyparquet@1.31.2/+esm";
+      import { Clip } from "/js/clip.js";
+
+      const q = new URLSearchParams(location.search);
+      const task = q.get("task") || "text";
+      const split = q.get("split") || "train";
+      const per = Number(q.get("per") || 1e9);
+      const post = q.get("post");
+      const out = document.getElementById("out");
+      const S = (window.EMBED = { done: false, count: 0, scanned: 0, skipped: 0 });
+      const round = (v) => Array.from(v, (x) => +x.toFixed(5));
+      const send = async (rows) => {
+        if (!rows.length) return;
+        await fetch(post, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(rows) });
+      };
+
+      const kb = await (await fetch("/models/objects-kb.json")).json();
+      const clip = new Clip();
+
+      if (task === "text") {
+        await clip.initText();
+        const embs = await clip.embedNames(kb.map((o) => o.name));
+        await send(kb.map((o, i) => ({ id: o.id, name: o.name, emb: round(embs[i]) })));
+        S.count = kb.length;
+      } else {
+        await clip.initVision();
+        // Caltech-256 label text → our object id
+        const toObj = new Map();
+        for (const o of kb) for (const c of o.caltech) toObj.set(c, o.id);
+        const files = {
+          train: ["data/train-00000-of-00002.parquet", "data/train-00001-of-00002.parquet"],
+          test: ["data/test-00000-of-00001.parquet"],
+          validation: ["data/validation-00000-of-00001.parquet"],
+        }[split];
+        const perClass = new Map();
+        const canvas = document.createElement("canvas");
+        for (const f of files) {
+          const file = await asyncBufferFromUrl({ url: `https://huggingface.co/datasets/ilee0022/Caltech-256/resolve/main/${f}` });
+          const meta = await parquetMetadataAsync(file);
+          // read labels first (cheap) so we only download images we'll use
+          const labels = await parquetReadObjects({ file, metadata: meta, columns: ["text"] });
+          let start = 0;
+          for (const rg of meta.row_groups) {
+            const n = Number(rg.num_rows);
+            const want = [];
+            for (let r = start; r < start + n; r++) {
+              const obj = toObj.get(labels[r].text);
+              if (obj === undefined) continue;
+              const k = perClass.get(labels[r].text) || 0;
+              if (k >= per) continue;
+              perClass.set(labels[r].text, k + 1);
+              want.push(r);
+            }
+            S.scanned += n;
+            if (want.length) {
+              const rows = await parquetReadObjects({ file, metadata: meta, rowStart: start, rowEnd: start + n, columns: ["image", "text"], utf8: false });
+              const batch = [];
+              for (const r of want) {
+                const row = rows[r - start];
+                try {
+                  const bmp = await createImageBitmap(new Blob([row.image.bytes]));
+                  canvas.width = bmp.width;
+                  canvas.height = bmp.height;
+                  canvas.getContext("2d").drawImage(bmp, 0, 0);
+                  bmp.close();
+                  const emb = await clip.embedImage(canvas);
+                  const caltech = typeof row.text === "string" ? row.text : new TextDecoder().decode(row.text); // annotated STRING columns stay strings
+                  batch.push({ split, caltech, obj: toObj.get(caltech), emb: round(emb) });
+                  S.count++;
+                } catch {
+                  S.skipped++;
+                }
+              }
+              await send(batch);
+            }
+            start += n;
+            out.textContent = `${split}: ${S.count} images embedded (${S.skipped} unreadable) · ${S.scanned} rows scanned`;
+          }
+        }
+      }
+      S.done = true;
+      out.textContent += `\ndone (${S.count})`;
+    </script>
+  </body>
+</html>
