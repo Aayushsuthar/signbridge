@@ -124,6 +124,7 @@ test("English → ASL gloss: time first, wh last, names fingerspelled", () => {
   assert.equal(g("What is your name?"), "your name what");
   assert.equal(g("My name is Aayush"), "my name fs:aayush");
   assert.equal(g("Thank you!"), "thank you");
+  assert.equal(g("Where do you live? I live in Jaipur."), "you live where me live in fs:jaipur");
 });
 
 test("object knowledge base: every entry complete, names unique", () => {
