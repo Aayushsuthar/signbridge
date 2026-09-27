@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web Photo Collection</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; padding: 24px 16px; background: #07080d; color: #e9ecf3; font: 14px/1.5 system-ui, sans-serif; }
+      main { max-width: 800px; margin: 0 auto; }
+      p, code { color: #8b93a7; }
+      pre { background: #12151e; border: 1px solid #242938; border-radius: 12px; padding: 12px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Clean web photos for every object</h1>
+      <p>For each object in <code>/models/objects-kb.json</code>: searches Wikimedia Commons, embeds each photo with the app's CLIP, and keeps it only if CLIP ranks the object's own name in its top 5 among all objects (the CLIP-filtering used to clean web datasets like LAION). Photos in the evaluation categories are excluded. Rows <code>{ obj, file, rank, emb }</code> go to <code>?post=</code>.</p>
+      <pre id="out">starting…</pre>
+    </main>
+    <script type="module">
+      import { Clip } from "/js/clip.js";
+
+      const q = new URLSearchParams(location.search);
+      const post = q.get("post");
+      const perObject = Number(q.get("per") || 15);
+      const from = Number(q.get("from") || 0);
+      const out = document.getElementById("out");
+      const S = (window.WEB = { objects: 0, fetched: 0, kept: 0, dropped: 0, excluded: 0, done: false });
+      const api = (params) => fetch(`https://commons.wikimedia.org/w/api.php?${new URLSearchParams({ ...params, format: "json", origin: "*" })}`).then((r) => r.json());
+      const dot = (a, b) => {
+        let s = 0;
+        for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+        return s;
+      };
+      async function pool(items, n, fn) {
+        const results = [];
+        let i = 0;
+        await Promise.all(Array.from({ length: n }, async () => {
+          while (i < items.length) {
+            const k = i++;
+            results[k] = await fn(items[k]).catch(() => null);
+          }
+        }));
+        return results;
+      }
+
+      const kb = await (await fetch("/models/objects-kb.json")).json();
+      const clip = await new Clip().initVision();
+      await clip.initText();
+      const T = await clip.embedNames(kb.map((o) => o.name));
+
+      // keep the evaluation photos out of training
+      const EVAL_CATS = ["Wallets", "Keys (lock)", "Smartphones", "Sunglasses", "Pressure cookers", "Buckets", "Brooms", "Toothbrushes", "Water bottles", "Scissors", "Padlocks", "Combs", "Candles", "Bananas", "Pillows", "Wall clocks", "Mugs", "Backpacks", "Laptops", "Spoons", "Umbrellas", "Calculators", "Headphones", "Computer mice", "Toasters", "Screwdrivers"];
+      const evalFiles = new Set();
+      for (const cat of EVAL_CATS) {
+        const d = await api({ action: "query", list: "categorymembers", cmtitle: `Category:${cat}`, cmtype: "file", cmlimit: "40" });
+        for (const m of d.query?.categorymembers || []) evalFiles.add(m.title);
+      }
+
+      const canvas = document.createElement("canvas");
+      for (const [oi, o] of kb.entries()) {
+        if (oi < from || o.name === "person") continue;
+        const d = await api({ action: "query", generator: "search", gsrnamespace: "6", gsrsearch: `${o.name} filetype:bitmap`, gsrlimit: "30", prop: "imageinfo", iiprop: "url|mime", iiurlwidth: "400" });
+        const pages = Object.values(d.query?.pages || {}).filter((p) => /jpeg|png/.test(p.imageinfo?.[0]?.mime || "") && !(evalFiles.has(p.title) && ++S.excluded));
+        // download in parallel, embed in order
+        const blobs = await pool(pages, 8, async (p) => {
+          const ctl = new AbortController();
+          const t = setTimeout(() => ctl.abort(), 10000);
+          try {
+            return await (await fetch(p.imageinfo[0].thumburl, { signal: ctl.signal })).blob();
+          } finally {
+            clearTimeout(t);
+          }
+        });
+        const rows = [];
+        for (const [k, blob] of blobs.entries()) {
+          if (!blob || rows.length >= perObject) continue;
+          try {
+            const bmp = await createImageBitmap(blob);
+            canvas.width = bmp.width;
+            canvas.height = bmp.height;
+            canvas.getContext("2d").drawImage(bmp, 0, 0);
+            bmp.close();
+            const e = await clip.embedImage(canvas);
+            S.fetched++;
+            const target = dot(e, T[oi]);
+            let rank = 0;
+            for (let j = 0; j < T.length; j++) if (j !== oi && dot(e, T[j]) > target) rank++;
+            if (rank < 5) {
+              rows.push({ obj: o.id, name: o.name, src: "commons-search", file: pages[k].title, rank, emb: Array.from(e, (x) => +x.toFixed(5)) });
+              S.kept++;
+            } else S.dropped++;
+          } catch {}
+        }
+        if (rows.length) await fetch(post, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(rows) });
+        S.objects = oi + 1;
+        out.textContent = `${S.objects}/${kb.length} objects · ${S.fetched} photos checked · ${S.kept} kept · ${S.dropped} rejected by CLIP filter · ${S.excluded} excluded (eval set)`;
+      }
+      S.done = true;
+      out.textContent += "\ndone";
+    </script>
+  </body>
+</html>

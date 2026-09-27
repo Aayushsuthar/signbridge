@@ -133,4 +133,13 @@ test("object knowledge base: every entry complete, names unique", () => {
   for (const o of kb) assert.ok(o.name && o.hi && o.cat && o.use, `incomplete: ${o.name}`);
 });
 
+test("object model matches the knowledge base and has a prototype for every object", () => {
+  const kb = JSON.parse(readFileSync(new URL("../public/models/objects-kb.json", import.meta.url)));
+  const model = JSON.parse(readFileSync(new URL("../public/models/objects-clip.json", import.meta.url)));
+  assert.deepEqual(model.names, kb.map((o) => o.name));
+  assert.equal(model.weights[0].length, model.dim);
+  assert.ok(model.prototypes.filter(Boolean).length >= kb.length - 2);
+  assert.ok(model.meta.test.adapter.top1 > 0.85, "held-out accuracy regressed");
+});
+
 console.log(`\n${passed} checks passed`);
